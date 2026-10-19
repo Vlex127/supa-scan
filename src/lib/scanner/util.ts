@@ -43,6 +43,40 @@ export function fieldArray(body: Record<string, unknown>, key: string): unknown[
   return Array.isArray(value) ? value : [];
 }
 
+// Read a list of { String: { sval } } nodes into their string values, in order.
+// Used for qualified-name paths (DROP targets, function names).
+export function stringNodes(items: unknown): string[] {
+  const out: string[] = [];
+  if (!Array.isArray(items)) return out;
+  for (const item of items) {
+    const node = unwrapNode(item);
+    if (node?.kind === "String") {
+      const value = fieldString(node.body, "sval");
+      if (value !== undefined) out.push(value);
+    }
+  }
+  return out;
+}
+
+// Last segment of a dotted name; the parser normalizes identifiers, so this is
+// a stable identity across `todos` and `public.todos`.
+export function lastSegment(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot === -1 ? name : name.slice(dot + 1);
+}
+
+// The set of roles that can be reached without a signed-in session: the `anon`
+// role and the PUBLIC pseudo-role. `authenticated` is excluded on purpose — it
+// requires a valid JWT and its privileges are governed by RLS policies, so a
+// policy bound only to it is not anonymous access.
+export function hasWriteRole(roles: { roletype: string; rolename?: string }[]): boolean {
+  return roles.some(
+    (r) =>
+      r.roletype === "ROLESPEC_PUBLIC" ||
+      (r.roletype === "ROLESPEC_CSTRING" && r.rolename === "anon"),
+  );
+}
+
 // Convert an absolute byte offset (a node's `location`) into a 1-based line
 // number within the file content the offset indexes.
 export function lineFromOffset(content: string, offset: number): number {

@@ -8,6 +8,8 @@ export type Severity = "high" | "medium" | "low" | "info";
 
 // The fixed rule allowlist. SQL rules (1-5) operate on the parsed, ordered
 // schema state; source rules (6-7) operate on raw file text and land in slice 3.
+// PARSE_FAILED is a diagnostic kind, not a rule: it marks a file the scanner
+// could not analyze, so a clean result never silently hides unread input.
 export const RULE_IDS = [
   "RLS_DISABLED",
   "POLICY_PERMISSIVE",
@@ -16,6 +18,7 @@ export const RULE_IDS = [
   "SECDEF_NO_SEARCH_PATH",
   "KEY_SERVICE_ROLE_CLIENT",
   "SECRET_COMMITTED",
+  "PARSE_FAILED",
 ] as const;
 
 export type RuleId = (typeof RULE_IDS)[number];
@@ -93,4 +96,24 @@ export interface SchemaState {
   policies: PolicyState[];
   views: ViewState[];
   functions: FunctionState[];
+}
+
+// A file the scanner could not parse. It is reported alongside (never folded
+// into) real findings, and forces the scan to be incomplete: the scanner cannot
+// certify what it could not read, and an unparsed migration may be exactly the
+// one holding the policy we were asked to check.
+export interface ParseFailure {
+  ruleId: "PARSE_FAILED";
+  severity: Severity;
+  file: string;
+  line: number;
+  message: string;
+}
+
+// The full result of a scan. `complete` is false when any input was skipped, so
+// callers can tell "clean" apart from "could not finish".
+export interface ScanResult {
+  complete: boolean;
+  findings: Finding[];
+  parseFailures: ParseFailure[];
 }

@@ -1,10 +1,16 @@
-import type { SchemaRule } from "../types";
+import type { SchemaRule, Severity } from "../types";
+import { hasWriteRole } from "../util";
 
-// A policy whose USING or WITH CHECK predicate is the constant TRUE admits every
-// row (or lets every write through) for its role set.
+const READ_CMDS = new Set(["select"]);
+
+// A constant-TRUE predicate is only dangerous where it guards a WRITE. A read
+// policy with USING (true) is the legitimate "public reference data" pattern, so
+// it is deliberately not flagged. When it does guard a write, severity follows
+// the role: an anonymous/PUBLIC writer is high; an authenticated-only writer is
+// medium (the caller still needs a valid session).
 export const policyPermissive: SchemaRule = (state) =>
   state.policies
-    .filter((p) => p.usingTrue || p.withCheckTrue)
+    .filter((p) => !READ_CMDS.has(p.cmd) && (p.usingTrue || p.withCheckTrue))
     .map((p) => {
       const clause =
         p.usingTrue && p.withCheckTrue
@@ -12,16 +18,17 @@ export const policyPermissive: SchemaRule = (state) =>
           : p.usingTrue
             ? "USING (true)"
             : "WITH CHECK (true)";
+      const severity: Severity = hasWriteRole(p.roles) ? "high" : "medium";
       return {
         ruleId: "POLICY_PERMISSIVE" as const,
-        severity: "high" as const,
+        severity,
         file: p.file,
         line: p.line,
         object: p.table,
-        evidence: `Policy "${p.name}" on ${p.table} uses ${clause}`,
+        evidence: `Policy "${p.name}" uses ${clause} on a ${p.cmd.toUpperCase()} for ${p.table}`,
         remediation:
           "Replace the constant-TRUE predicate with a real check that binds rows to the " +
-          "requesting user, e.g. USING ((select auth.uid()) = user_id). A constant-TRUE " +
-          "predicate matches every row regardless of owner.",
+          "requesting user, e.g. WITH CHECK ((select auth.uid()) = user_id). A constant-TRUE " +
+          "predicate lets any matching role write or read every row.",
       };
     });

@@ -1,6 +1,7 @@
 import { parse } from "libpg-query";
 import type {
   FunctionState,
+  ParseFailure,
   PolicyState,
   RoleRef,
   ScannedFile,
@@ -13,61 +14,88 @@ import {
   fieldNumber,
   fieldString,
   isRecord,
+  lastSegment,
   lineFromOffset,
+  stringNodes,
   unwrapNode,
 } from "./util";
 
+export interface SchemaBuild {
+  state: SchemaState;
+  parseFailures: ParseFailure[];
+}
+
 // Build the FINAL schema state by applying migrations in a deterministic order.
 // Supabase migration filenames are timestamp-prefixed, so sorting by path gives
-// application order without trusting the caller's array order. RLS is a mutable
-// table property (enable here, disable there), so it is replayed in order; the
-// other objects are collected as a flat final set.
-export async function buildSchema(files: ScannedFile[]): Promise<SchemaState> {
+// application order without trusting the caller's array order. Tables, views and
+// functions are keyed maps so a later CREATE OR REPLACE or ALTER overwrites the
+// earlier definition; DROP removes them. A file that fails to parse is recorded
+// as a parse failure and contributes nothing — the scan is then incomplete.
+export async function buildSchema(files: ScannedFile[]): Promise<SchemaBuild> {
   const sql = files
     .filter((f) => f.path.toLowerCase().endsWith(".sql"))
     .sort((a, b) => a.path.localeCompare(b.path));
 
-  // Keyed by bare relation name so an unqualified `ALTER TABLE todos` matches a
-  // `CREATE TABLE public.todos`.
-  const tables = new Map<string, TableState>();
-  const policies: PolicyState[] = [];
-  const views: ViewState[] = [];
-  const functions: FunctionState[] = [];
+  const ctx: Ctx = {
+    tables: new Map(),
+    views: new Map(),
+    functions: new Map(),
+    policies: [],
+  };
+  const parseFailures: ParseFailure[] = [];
 
   for (const file of sql) {
     let stmts: unknown[];
     try {
       const result = await parse(file.content);
-      stmts = result.stmts ?? [];
-    } catch {
-      // Unparseable SQL must not abort the scan of the rest of the project.
+      stmts = Array.isArray(result.stmts) ? result.stmts : [];
+    } catch (error) {
+      parseFailures.push({
+        ruleId: "PARSE_FAILED",
+        severity: "high",
+        file: file.path,
+        line: 1,
+        message: `could not parse: ${String(error instanceof Error ? error.message : error).slice(0, 200)}`,
+      });
       continue;
     }
     for (const raw of stmts) {
       if (!isRecord(raw)) continue;
       const stmt = unwrapNode(raw.stmt);
       if (!stmt) continue;
-      applyStatement(stmt.kind, stmt.body, file, tables, policies, views, functions);
+      applyStatement(ctx, stmt.kind, stmt.body, file);
     }
   }
 
-  return { tables: [...tables.values()], policies, views, functions };
+  return {
+    state: {
+      tables: [...ctx.tables.values()],
+      views: [...ctx.views.values()],
+      functions: [...ctx.functions.values()],
+      policies: ctx.policies,
+    },
+    parseFailures,
+  };
+}
+
+interface Ctx {
+  tables: Map<string, TableState>;
+  views: Map<string, ViewState>;
+  functions: Map<string, FunctionState>;
+  policies: PolicyState[];
 }
 
 function applyStatement(
+  ctx: Ctx,
   kind: string,
   body: Record<string, unknown>,
   file: ScannedFile,
-  tables: Map<string, TableState>,
-  policies: PolicyState[],
-  views: ViewState[],
-  functions: FunctionState[],
 ): void {
   switch (kind) {
     case "CreateStmt": {
       const rel = readRelation(body.relation);
       if (!rel || !rel.exposed) return;
-      tables.set(rel.identity, {
+      ctx.tables.set(rel.identity, {
         qualified: rel.qualified,
         rlsEnabled: false,
         file: file.path,
@@ -76,24 +104,38 @@ function applyStatement(
       return;
     }
     case "AlterTableStmt": {
-      if (fieldString(body, "objtype") !== "OBJECT_TABLE") return;
       const rel = readRelation(body.relation);
       if (!rel) return;
-      const state = tables.get(rel.identity);
-      if (!state) return; // table is out of scope (non-public) or not created here
-      for (const cmd of fieldArray(body, "cmds")) {
-        const change = unwrapNode(cmd);
-        if (!change || change.kind !== "AlterTableCmd") continue;
-        const subtype = fieldString(change.body, "subtype");
-        if (subtype === "AT_EnableRowSecurity") state.rlsEnabled = true;
-        else if (subtype === "AT_DisableRowSecurity") state.rlsEnabled = false;
+      const objtype = fieldString(body, "objtype");
+      if (objtype === "OBJECT_TABLE") {
+        const table = ctx.tables.get(rel.identity);
+        if (!table) return;
+        for (const change of alterCmds(body)) {
+          const subtype = fieldString(change, "subtype");
+          if (subtype === "AT_EnableRowSecurity") table.rlsEnabled = true;
+          else if (subtype === "AT_DisableRowSecurity") table.rlsEnabled = false;
+          // FORCE / NO FORCE change table-owner bypass, not whether RLS is on;
+          // they leave rlsEnabled as-is.
+        }
+      } else if (objtype === "OBJECT_VIEW") {
+        const view = ctx.views.get(rel.identity);
+        if (!view) return;
+        for (const change of alterCmds(body)) {
+          const subtype = fieldString(change, "subtype");
+          if (subtype !== "AT_SetRelOptions" && subtype !== "AT_ResetRelOptions") continue;
+          for (const def of defElems(fieldValue(change, "def"))) {
+            if (fieldString(def, "defname") !== "security_invoker") continue;
+            view.securityInvoker =
+              subtype === "AT_SetRelOptions" && stringValue(fieldValue(def, "arg")) !== "false";
+          }
+        }
       }
       return;
     }
     case "CreatePolicyStmt": {
       const rel = readRelation(body.table);
       if (!rel || !rel.exposed) return;
-      policies.push({
+      ctx.policies.push({
         name: fieldString(body, "policy_name") ?? "",
         table: rel.qualified,
         cmd: (fieldString(body, "cmd_name") ?? "all").toLowerCase(),
@@ -105,10 +147,27 @@ function applyStatement(
       });
       return;
     }
+    case "AlterPolicyStmt": {
+      const rel = readRelation(body.table);
+      if (!rel) return;
+      const name = fieldString(body, "policy_name") ?? "";
+      const policy = ctx.policies.find(
+        (p) => p.name === name && lastSegment(p.table) === rel.identity,
+      );
+      if (!policy) return;
+      const roles = body.roles;
+      if (roles !== undefined) policy.roles = readRoles(roles);
+      if (body.qual !== undefined) policy.usingTrue = isLiteralTrue(body.qual);
+      if (body.with_check !== undefined) policy.withCheckTrue = isLiteralTrue(body.with_check);
+      return;
+    }
+    case "DropStmt":
+      applyDrop(ctx, body);
+      return;
     case "ViewStmt": {
       const rel = readRelation(body.view);
       if (!rel || !rel.exposed) return;
-      views.push({
+      ctx.views.set(rel.identity, {
         qualified: rel.qualified,
         securityInvoker: hasSecurityInvoker(body.options),
         file: file.path,
@@ -117,9 +176,9 @@ function applyStatement(
       return;
     }
     case "CreateFunctionStmt": {
-      const fn = readFunctionName(body.funcname);
+      const fn = readNameList(body.funcname);
       if (!fn || !fn.exposed) return;
-      functions.push({
+      ctx.functions.set(fn.identity, {
         qualified: fn.qualified,
         securityDefiner: hasSecurityDefiner(body.options),
         setsSearchPath: hasSetSearchPath(body.options),
@@ -128,35 +187,135 @@ function applyStatement(
       });
       return;
     }
+    case "AlterFunctionStmt": {
+      if (fieldString(body, "objtype") !== "OBJECT_FUNCTION") return;
+      const func = isRecord(body.func) ? body.func : undefined;
+      const fn = func ? readNameList(fieldValue(func, "objname")) : null;
+      if (!fn) return;
+      const target = ctx.functions.get(fn.identity);
+      if (!target) return;
+      for (const def of defElems(body.actions)) {
+        const defname = fieldString(def, "defname");
+        if (defname === "set") {
+          const set = unwrapNode(fieldValue(def, "arg"));
+          if (set?.kind === "VariableSetStmt" && fieldString(set.body, "name") === "search_path") {
+            target.setsSearchPath = true;
+          }
+        } else if (defname === "security") {
+          const value = unwrapNode(fieldValue(def, "arg"));
+          if (value?.kind === "Boolean") target.securityDefiner = value.body.boolval === true;
+        }
+      }
+      return;
+    }
     default:
       return;
   }
 }
 
+function applyDrop(ctx: Ctx, body: Record<string, unknown>): void {
+  const removeType = fieldString(body, "removeType");
+  for (const object of fieldArray(body, "objects")) {
+    const list = unwrapNode(object);
+    if (!list || list.kind !== "List") continue;
+    const path = stringNodes(fieldArray(list.body, "items"));
+    if (path.length === 0) continue;
+    const name = path[path.length - 1];
+    if (removeType === "OBJECT_TABLE") ctx.tables.delete(name);
+    else if (removeType === "OBJECT_VIEW") ctx.views.delete(name);
+    else if (removeType === "OBJECT_FUNCTION") ctx.functions.delete(name);
+    else if (removeType === "OBJECT_POLICY" && path.length >= 2) {
+      const tableName = path[path.length - 2];
+      ctx.policies = ctx.policies.filter(
+        (p) => !(p.name === name && lastSegment(p.table) === tableName),
+      );
+    }
+  }
+}
+
+// Reused helpers -------------------------------------------------------------
+
 interface RelationRef {
-  qualified: string; // e.g. "public.todos"
-  identity: string; // bare lowercased relation name, for alias matching
-  exposed: boolean; // public-schema (or unqualified) and not a temp table
+  qualified: string;
+  identity: string; // parser-normalized relation name (case already folded)
+  exposed: boolean;
   location: number;
 }
 
 function readRelation(node: unknown): RelationRef | null {
-  const rel = unwrapNode(node);
-  const source = rel && rel.kind === "RangeVar" ? rel.body : isRecord(node) ? node : null;
+  const wrapped = unwrapNode(node);
+  const source = wrapped && wrapped.kind === "RangeVar" ? wrapped.body : isRecord(node) ? node : null;
   if (!source) return null;
   const name = fieldString(source, "relname");
   if (!name) return null;
   const schema = fieldString(source, "schemaname");
   const persistence = fieldString(source, "relpersistence");
-  const qualified = schema ? `${schema}.${name}` : name;
-  const location = fieldNumber(source, "location") ?? 0;
-  const exposed = (schema === undefined || schema === "public") && persistence !== "t";
-  return { qualified, identity: name.toLowerCase(), exposed, location };
+  return {
+    qualified: schema ? `${schema}.${name}` : name,
+    identity: name,
+    exposed: (schema === undefined || schema === "public") && persistence !== "t",
+    location: fieldNumber(source, "location") ?? 0,
+  };
+}
+
+interface NameRef {
+  qualified: string;
+  identity: string;
+  exposed: boolean;
+}
+
+// Read a dotted name from a list of { String } nodes: [schema, name] or [name].
+function readNameList(nodes: unknown): NameRef | null {
+  const parts = Array.isArray(nodes) ? stringNodes(nodes) : [];
+  if (parts.length === 0) return null;
+  const name = parts[parts.length - 1];
+  const schema = parts.length > 1 ? parts[parts.length - 2] : undefined;
+  return {
+    qualified: schema ? `${schema}.${name}` : name,
+    identity: name,
+    exposed: schema === undefined || schema === "public",
+  };
+}
+
+function fieldValue(node: Record<string, unknown>, key: string): unknown {
+  return node[key];
+}
+
+function stringValue(node: unknown): string | undefined {
+  const wrapped = unwrapNode(node);
+  if (wrapped?.kind === "String") return fieldString(wrapped.body, "sval");
+  return undefined;
+}
+
+function alterCmds(body: Record<string, unknown>): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const item of fieldArray(body, "cmds")) {
+    const cmd = unwrapNode(item);
+    if (cmd?.kind === "AlterTableCmd") out.push(cmd.body);
+  }
+  return out;
+}
+
+// defElems accepts either a raw array of { DefElem } nodes (function options,
+// actions) or a single { List: { items } } wrapper (a rel-option `def`).
+function defElems(nodes: unknown): Record<string, unknown>[] {
+  const list: unknown[] = Array.isArray(nodes)
+    ? nodes
+    : (() => {
+        const wrapped = unwrapNode(nodes);
+        return wrapped?.kind === "List" ? fieldArray(wrapped.body, "items") : [];
+      })();
+  const out: Record<string, unknown>[] = [];
+  for (const item of list) {
+    const def = unwrapNode(item);
+    if (def?.kind === "DefElem") out.push(def.body);
+  }
+  return out;
 }
 
 function readRoles(nodes: unknown): RoleRef[] {
   const out: RoleRef[] = [];
-  for (const item of fieldArray({ roles: nodes }, "roles")) {
+  for (const item of Array.isArray(nodes) ? nodes : []) {
     const spec = unwrapNode(item);
     if (!spec || spec.kind !== "RoleSpec") continue;
     out.push({
@@ -167,7 +326,6 @@ function readRoles(nodes: unknown): RoleRef[] {
   return out;
 }
 
-// USING (true) / WITH CHECK (true) parse to A_Const { boolval: { boolval: true } }.
 function isLiteralTrue(node: unknown): boolean {
   const constNode = unwrapNode(node);
   if (!constNode || constNode.kind !== "A_Const") return false;
@@ -175,43 +333,27 @@ function isLiteralTrue(node: unknown): boolean {
   return isRecord(bool) && bool.boolval === true;
 }
 
-function options(nodes: unknown): Record<string, unknown>[] {
-  const defs: Record<string, unknown>[] = [];
-  for (const item of fieldArray({ options: nodes }, "options")) {
-    const def = unwrapNode(item);
-    if (def && def.kind === "DefElem") defs.push(def.body);
-  }
-  return defs;
-}
-
 function hasSecurityInvoker(nodes: unknown): boolean {
-  for (const def of options(nodes)) {
+  for (const def of defElems(nodes)) {
     if (fieldString(def, "defname") !== "security_invoker") continue;
-    // WITH (security_invoker) or (security_invoker=true) is invoker-safe;
-    // an explicit false is not.
-    const arg = def.arg;
-    if (isRecord(arg) && unwrapNode(arg)?.kind === "String") {
-      const value = unwrapNode(arg)!.body;
-      if (fieldString(value, "sval") === "false") return false;
-    }
-    return true;
+    return stringValue(fieldValue(def, "arg")) !== "false";
   }
   return false;
 }
 
 function hasSecurityDefiner(nodes: unknown): boolean {
-  for (const def of options(nodes)) {
+  for (const def of defElems(nodes)) {
     if (fieldString(def, "defname") !== "security") continue;
-    const arg = unwrapNode(def.arg);
+    const arg = unwrapNode(fieldValue(def, "arg"));
     return arg?.kind === "Boolean" && arg.body.boolval === true;
   }
   return false;
 }
 
 function hasSetSearchPath(nodes: unknown): boolean {
-  for (const def of options(nodes)) {
+  for (const def of defElems(nodes)) {
     if (fieldString(def, "defname") !== "set") continue;
-    const set = unwrapNode(def.arg);
+    const set = unwrapNode(fieldValue(def, "arg"));
     if (set?.kind === "VariableSetStmt" && fieldString(set.body, "name") === "search_path") {
       return true;
     }
@@ -219,35 +361,10 @@ function hasSetSearchPath(nodes: unknown): boolean {
   return false;
 }
 
-interface FunctionRef {
-  qualified: string;
-  exposed: boolean;
-}
-
-// funcname is a list of String nodes: [schema, name] or [name].
-function readFunctionName(nodes: unknown): FunctionRef | null {
-  const parts: string[] = [];
-  for (const item of fieldArray({ funcname: nodes }, "funcname")) {
-    const str = unwrapNode(item);
-    if (str?.kind === "String") {
-      const value = fieldString(str.body, "sval");
-      if (value) parts.push(value);
-    }
-  }
-  if (parts.length === 0) return null;
-  const name = parts[parts.length - 1];
-  const schema = parts.length > 1 ? parts[parts.length - 2] : undefined;
-  return {
-    qualified: schema ? `${schema}.${name}` : name,
-    exposed: schema === undefined || schema === "public",
-  };
-}
-
 function earliestOptionLocation(nodes: unknown): number {
   let min = Number.POSITIVE_INFINITY;
-  for (const item of fieldArray({ options: nodes }, "options")) {
-    const def = unwrapNode(item);
-    const loc = def ? fieldNumber(def.body, "location") : undefined;
+  for (const def of defElems(nodes)) {
+    const loc = fieldNumber(def, "location");
     if (loc !== undefined && loc < min) min = loc;
   }
   return Number.isFinite(min) ? min : 0;

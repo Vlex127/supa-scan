@@ -1,4 +1,4 @@
-import type { Finding, ScannedFile, SchemaRule } from "./types";
+import type { Finding, ScanResult, ScannedFile, SchemaRule } from "./types";
 import { buildSchema } from "./schema";
 import { rlsDisabled } from "./rules/rls-disabled";
 import { policyPermissive } from "./rules/policy-permissive";
@@ -24,18 +24,26 @@ const SEVERITY_ORDER: Record<Finding["severity"], number> = {
   info: 3,
 };
 
+function byFileThenLine<T extends { file: string; line: number }>(a: T, b: T): number {
+  return a.file.localeCompare(b.file) || a.line - b.line;
+}
+
 // Scan a set of already-read files. SQL is parsed to a real Postgres AST and the
 // migrations are replayed in path order into a final schema state before rules
 // run, so a policy in one file can see a table (and its RLS flag) from another.
-export async function runScan(files: ScannedFile[]): Promise<Finding[]> {
-  const state = await buildSchema(files);
-  const findings = SCHEMA_RULES.flatMap((rule) => rule(state));
-  return findings.sort(
+// The result separates real findings from files that could not be parsed, and is
+// only `complete` when nothing was skipped.
+export async function runScan(files: ScannedFile[]): Promise<ScanResult> {
+  const { state, parseFailures } = await buildSchema(files);
+  const findings = SCHEMA_RULES.flatMap((rule) => rule(state)).sort(
     (a, b) =>
-      SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] ||
-      a.file.localeCompare(b.file) ||
-      a.line - b.line,
+      SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || byFileThenLine(a, b),
   );
+  return {
+    complete: parseFailures.length === 0,
+    findings,
+    parseFailures: parseFailures.sort(byFileThenLine),
+  };
 }
 
 export * from "./types";

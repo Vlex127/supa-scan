@@ -20,6 +20,14 @@ create policy "insert own" on public.todos
   to authenticated
   with check ((select auth.uid()) = user_id);
 
+-- Deliberately kept: a public-read policy with USING (true) is the legitimate
+-- "reference data" pattern, not a vulnerability. The scanner must NOT flag a
+-- constant-TRUE predicate on a read-only policy.
+create policy "read_public" on public.todos
+  for select
+  to public
+  using (true);
+
 create view public.todo_summary
   with (security_invoker = true)
 as
