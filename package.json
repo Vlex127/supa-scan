@@ -5,10 +5,12 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:cli": "tsc -p tsconfig.cli.json",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "scan": "node dist/cli/bin.js"
   },
   "dependencies": {
     "libpg-query": "18.1.5",
