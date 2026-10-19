@@ -2,14 +2,18 @@
 // set of already-read files ({path, content}) and returns structured findings.
 // It never touches the network, never executes scanned code, and never writes
 // to the scanned project. Rule IDs come from a fixed allowlist (no dynamic
-// dispatch), mirroring the {field, op, value} discipline used elsewhere.
+// dispatch); a rule is a named function, never a string looked up at runtime.
 
 export type Severity = "high" | "medium" | "low" | "info";
 
+// The fixed rule allowlist. SQL rules (1-5) operate on the parsed, ordered
+// schema state; source rules (6-7) operate on raw file text and land in slice 3.
 export const RULE_IDS = [
-  "RLS_MISSING",
+  "RLS_DISABLED",
   "POLICY_PERMISSIVE",
-  "POLICY_NO_AUTH_BIND",
+  "POLICY_ANON_WRITE",
+  "VIEW_NO_SECURITY_INVOKER",
+  "SECDEF_NO_SEARCH_PATH",
   "KEY_SERVICE_ROLE_CLIENT",
   "SECRET_COMMITTED",
 ] as const;
@@ -25,7 +29,9 @@ export interface Finding {
   severity: Severity;
   file: string;
   line: number;
-  table?: string;
+  // The affected database object (table, policy target, view or function) for
+  // schema rules. Never echoes a secret value for source rules.
+  object?: string;
   // A short, sanitized snippet. For secret-bearing rules the matched value is
   // masked before it ever reaches this field — evidence must never carry a key.
   evidence: string;
@@ -37,7 +43,54 @@ export interface ScannedFile {
   content: string;
 }
 
-// A rule is a pure function from the whole file set to zero or more findings.
-// Rules see all files together because RLS enablement may live in a different
-// migration than the CREATE TABLE it protects.
-export type Rule = (files: ScannedFile[]) => Finding[];
+// A schema rule is a pure function from the final schema state to findings. It
+// sees the whole migration set at once because RLS enablement, a policy, or a
+// view can be defined in a different file than the table it governs.
+export type SchemaRule = (state: SchemaState) => Finding[];
+
+export interface TableState {
+  qualified: string; // display name, e.g. "public.todos"
+  rlsEnabled: boolean;
+  file: string;
+  line: number;
+}
+
+export interface PolicyState {
+  name: string;
+  table: string; // qualified target table
+  cmd: string; // "all" | "select" | "insert" | "update" | "delete"
+  roles: RoleRef[];
+  usingTrue: boolean;
+  withCheckTrue: boolean;
+  file: string;
+  line: number;
+}
+
+// A policy grantee, already resolved to the two things a rule cares about:
+// whether it is PUBLIC (everyone) or the anonymous role, plus its name.
+export interface RoleRef {
+  roletype: string;
+  rolename?: string;
+}
+
+export interface ViewState {
+  qualified: string;
+  securityInvoker: boolean;
+  file: string;
+  line: number;
+}
+
+export interface FunctionState {
+  qualified: string;
+  securityDefiner: boolean;
+  setsSearchPath: boolean;
+  file: string;
+  line: number;
+}
+
+export interface SchemaState {
+  tables: TableState[];
+  policies: PolicyState[];
+  views: ViewState[];
+  functions: FunctionState[];
+}
