@@ -3,6 +3,7 @@ import { runScan } from "../index";
 import type { Finding, ScannedFile } from "../types";
 import { keyServiceRoleClient } from "../rules/key-service-role-client";
 import { secretCommitted } from "../rules/secret-committed";
+import { CHUNK_WINDOW } from "../masking";
 import {
   anonJwt,
   authenticatedJwt,
@@ -76,6 +77,30 @@ describe("KEY_SERVICE_ROLE_CLIENT", () => {
     expect(keyServiceRoleClient([src("a.ts", anonJwt())])).toHaveLength(0);
     expect(keyServiceRoleClient([src("a.ts", authenticatedJwt())])).toHaveLength(0);
   });
+
+  it("(c) detects a service_role JWT parked past 3000 characters on one long line", () => {
+    // The old scanner skipped lines over 2000 chars — a silent blindable evasion. A
+    // credential buried in a long (generated-looking) line must still be found.
+    const token = serviceRoleJwt();
+    const prefix = "/* " + "A".repeat(3000) + " */ const key = ";
+    const out = keyServiceRoleClient([src("bundle.ts", prefix + `"${token}";`)]);
+    expect(out).toHaveLength(1);
+    expect(out[0].severity).toBe("critical");
+    expect(out[0].line).toBe(1);
+    expect(haystack(out[0])).not.toContain(token);
+  });
+
+  it("(c) detects a JWT that straddles a chunk boundary (overlap covers it once)", () => {
+    // Place the token so its start sits just before a window cut. The preceding
+    // window sees only a truncated fragment (which must not false-positive); the
+    // overlapping window contains the whole token, so exactly one finding results.
+    const token = serviceRoleJwt();
+    const prefix = "x".repeat(CHUNK_WINDOW - 40) + 'const key = "';
+    const out = keyServiceRoleClient([src("big.ts", prefix + token + '";')]);
+    expect(out).toHaveLength(1);
+    expect(out[0].severity).toBe("critical");
+    expect(haystack(out[0])).not.toContain(token);
+  });
 });
 
 describe("SECRET_COMMITTED", () => {
@@ -94,8 +119,16 @@ describe("SECRET_COMMITTED", () => {
     expect(secretCommitted([src("c.ts", pub)])).toHaveLength(0);
   });
 
-  it("flags a PEM private-key block (the header line, which is not itself secret)", () => {
-    const pem = secretCommitted([
+  it("flags an sb_secret_ key buried past the 2000-char line the old scanner skipped", () => {
+    const secret = supabaseSecretKey();
+    const prefix = "/*" + "z".repeat(2500) + "*/ const k = ";
+    const out = secretCommitted([src("bundle.ts", prefix + `"${secret}";`)]);
+    expect(out).toHaveLength(1);
+    expect(out[0].line).toBe(1);
+    expect(haystack(out[0])).not.toContain(secret);
+  });
+
+  it("flags a PEM private-key block (the header line, which is not itself secret)", () => {    const pem = secretCommitted([
       src("key.ts", 'const p = "-----BEGIN RSA PRIVATE KEY-----";'),
     ]);
     expect(pem).toHaveLength(1);

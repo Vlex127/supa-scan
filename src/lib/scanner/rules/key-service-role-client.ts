@@ -1,6 +1,6 @@
 import type { Finding, ScannedFile, TextRule } from "../types";
 import { isSourceFile } from "../scope";
-import { scanLines, clipName, describeLength } from "../masking";
+import { scanChunks, clipName, describeLength } from "../masking";
 import { findServiceRoleJwtLiterals } from "../jwt";
 
 // The service_role key (and its sb_secret_/sbp_ successors) bypasses row-level
@@ -63,9 +63,7 @@ export const keyServiceRoleClient: TextRule = (files: ScannedFile[]): Finding[] 
     if (!isSourceFile(file.path)) continue;
     const useClient = usesClientDirective(file.content);
 
-    for (const { line, text, skipped } of scanLines(file.content)) {
-      if (skipped) continue;
-
+    for (const { line, text } of scanChunks(file.content)) {
       // (c) A decoded service_role JWT is the most severe signal; it is a literal
       // credential regardless of any name or directive.
       for (const token of findServiceRoleJwtLiterals(text)) {

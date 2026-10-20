@@ -1,6 +1,6 @@
 import type { Finding, ScannedFile, TextRule } from "../types";
 import { isSourceFile, isEnvFile } from "../scope";
-import { scanLines, clipName, describeLength } from "../masking";
+import { scanChunks, clipName, describeLength } from "../masking";
 import { findServiceRoleJwtLiterals } from "../jwt";
 
 // A narrow, Supabase-specific committed-secret check. General secret scanning is
@@ -71,9 +71,7 @@ export const secretCommitted: TextRule = (files: ScannedFile[]): Finding[] => {
     const env = isEnvFile(file.path);
     if (!env && !isSourceFile(file.path)) continue;
 
-    for (const { line, text, skipped } of scanLines(file.content)) {
-      if (skipped) continue;
-
+    for (const { line, text } of scanChunks(file.content)) {
       let formatHit = false;
 
       for (const match of text.matchAll(SB_SECRET_RE)) {
