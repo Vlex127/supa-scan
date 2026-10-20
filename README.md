@@ -102,15 +102,18 @@ or rely on GitHub's push protection alongside supa-scan.
   dependency that is not on the scanner's runtime or scan path. There is **no
   patched release** of `braces` (3.0.3 is the latest), so no override is
   possible; it is tracked here and re-audited on each dependency bump.
-- **Release age gate (off).** A `minimumReleaseAge` delay was evaluated as a
-  first-moment supply-chain guard. pnpm's `minimumReleaseAgeExclude` works
-  (including `@next/*` scoping), but on a freshly adopted Next.js 16.4.2 the
-  14-day window also falls over the whole build toolchain (`@babel/*`,
-  `@rolldown/*`, `@oxc-project/*`, `@typescript-eslint/*`, and more), so passing
-  it would mean exempting the bulk of the tree — which defeats the gate. The age
-  policy is therefore **left off** rather than ship a config that breaks
-  `pnpm install` on a clean checkout, and is to be revisited once the pinned
-  Next.js release ages past the target window.
+- **Release age gate (off, revisit 2026-10-29).** `minimumReleaseAge` was evaluated
+  as a first-moment supply-chain guard and **tested against a clean checkout**:
+  with `minimumReleaseAge: 20160` (14 days) and `minimumReleaseAgeExclude` for
+  `next`, `@next/*`, and `electron-to-chromium`, `pnpm install` still fails with
+  `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` on **42 lockfile entries** — not the
+  excluded ones but the transitive build toolchain Next pulls in: `@babel/*`,
+  `@rolldown/*` (1.2.14, published 2026-10-14), `@oxc-project/*`, and
+  `@typescript-eslint/*` (8.71.2). Exempting those is the bulk of the dev tree,
+  which defeats the gate, so the policy is **left off** rather than ship a config
+  that breaks `pnpm install` from a clean checkout. **Reminder:** re-enable it on or
+  after **2026-10-29**, once these pins age past the 14-day window; until then the
+  exact-pins + committed-lockfile + `--ignore-scripts` posture above is the guard.
 
 ## Limitations
 
