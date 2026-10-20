@@ -175,4 +175,13 @@ pnpm build                       # next build
 
 ## License
 
-MIT
+Released under the [MIT License](LICENSE). See [SECURITY.md](SECURITY.md) for the
+authorized-use policy and how to report a vulnerability.
+
+## About this build
+
+This project was built with **AI-assisted development**: an AI pair-programmed
+the modules, tests, and docs alongside me, and where AI assistance was used the
+commit carries a `Co-Authored-By` trailer. The design decisions, security
+posture, and trust boundaries are mine to explain and defend — the value here is
+the architecture and the verification, not the keystrokes.
