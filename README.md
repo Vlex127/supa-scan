@@ -9,16 +9,15 @@ and emits **structured findings**.
 The point is **timing and surface**. Supabase already ships a database
 **Security Advisor** that flags several of these issues on a *live* database.
 supa-scan instead runs **before deploy, in CI, against source and migrations** —
-and will also catch things a live-DB linter cannot see, such as a `service_role`
-key baked into a client bundle or a secret committed to the repo.
+and catches things a live-DB linter cannot see, such as a `service_role` key baked
+into a client bundle or a Supabase secret committed to the repo.
 
 ## Status
 
-The scanner **engine** is implemented and tested: an ordered schema-state builder
-from a real AST, plus the five v1 SQL rules below. The **CLI** (JSON + SARIF
-output, exit codes, and project file collection) is the next milestone, followed
-by the key/secret rules and a client-side demo UI. Usage examples are added once
-the CLI lands.
+The scanner **engine** and **CLI** are implemented and tested: an ordered
+schema-state builder from a real AST, seven rules (five SQL, two source/env),
+JSON and SARIF output, deterministic and hostile-input-safe file collection, and
+CI exit codes. A client-side demo UI is the next milestone.
 
 ## What it checks (v1)
 
@@ -29,12 +28,58 @@ the CLI lands.
 | `POLICY_ANON_WRITE` | high | A write policy (`INSERT`/`UPDATE`/`DELETE`/`ALL`) reachable by `anon` or `PUBLIC`. |
 | `VIEW_NO_SECURITY_INVOKER` | medium | A view created without `security_invoker` (runs as its owner, bypassing the base table's RLS). |
 | `SECDEF_NO_SEARCH_PATH` | high | A `SECURITY DEFINER` function without a fixed `search_path` (hijackable via a shadowing object). |
+| `KEY_SERVICE_ROLE_CLIENT` | **critical** / high | A `service_role` credential in client-reachable code: a `NEXT_PUBLIC_*` name mentioning `SERVICE_ROLE`/`SECRET` (high), a service-role reference inside a `"use client"` module (high), or a JWT literal whose **decoded payload** asserts `role: service_role` (critical). |
+| `SECRET_COMMITTED` | high | Supabase-specific committed secrets: an `sb_secret_*`/`sbp_*` key, a PEM private-key block, a service-role JWT in a `.env` file, or a key-like `.env` assignment. Evidence is **masked** — never the secret. |
 
-Planned next: `KEY_SERVICE_ROLE_CLIENT` (incl. a JWT-payload check) and
-`SECRET_COMMITTED` (masked evidence). Deferred as needing data-flow analysis.
+The `critical` tier is reserved for a confirmed `service_role` credential in client
+code (a full RLS bypass). Severity order is `critical > high > medium > low > info`.
+
+The five SQL rules run on the parsed, ordered schema state. The two source rules
+run on raw **text** (`.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs`/`.json` and `.env*`)
+and scope themselves; they decode JWT payloads with a dependency-free, browser-
+portable base64url decoder and **never** verify signatures (a leaked key is
+dangerous whatever its signature). The `anon` key is the public, logged-out role
+and is never flagged — `sb_publishable_*` and a `role: anon` payload are expected.
 
 Rules are a fixed allowlist of pure functions. There is no `eval`, no dynamic
 dispatch of scanned content, and no network access at scan time.
+
+## Usage
+
+Build the CLI once, then run it against a project directory:
+
+```bash
+pnpm build:cli
+node dist/cli/bin.js [scan] [options] [root]
+
+node dist/cli/bin.js                      # scan the current dir, JSON to stdout
+node dist/cli/bin.js --format sarif .     # SARIF 2.1.0 for GitHub code scanning
+node dist/cli/bin.js --fail-on high .     # exit 1 only on high-or-worse findings
+node dist/cli/bin.js --help               # full help
+```
+
+Exit codes: **0** clean (no finding at or above `--fail-on`), **1** one or more
+findings at or above the gate, **2** usage error, tool error, **or an incomplete
+scan**. Incomplete outranks findings: if a scannable file was skipped (oversized,
+over count, a symlink we don't follow, or unreadable) or a file failed to parse,
+the scan is `complete: false`, surfaces in SARIF via
+`invocations[].toolExecutionNotifications` with `executionSuccessful: false`, and
+exits 2 rather than reporting a false-clean pass.
+
+## Scope, secrets, and what "committed" means
+
+The scanner reports on **the files it is given**. It reads only the working
+directory you point it at — it runs no git, opens no database, and reaches no
+network. In CI, where a checkout contains only tracked files, "the files it is
+given" equals "the committed files." To restrict a local run to tracked files,
+pass them explicitly (e.g. via `git ls-files -z`) rather than scanning a dirty
+tree that still holds an ignored `.env`.
+
+`SECRET_COMMITTED` targets **Supabase-specific credential formats** (service-role
+JWTs, `sb_secret_*`/`sbp_*` keys, `.env` assignments) because a Supabase scanner
+should catch the keys that bypass its RLS. It is **not** a general secret scanner —
+for the broad case (AWS keys, GitHub tokens, arbitrary passwords) run **gitleaks**
+or rely on GitHub's push protection alongside supa-scan.
 
 ## Supply chain
 
@@ -86,6 +131,18 @@ dispatch of scanned content, and no network access at scan time.
   table with no policies denies access by default (safe but possibly broken);
   correct policies still need authoring. Use supa-scan in CI **alongside** the
   live Security Advisor.
+- **Only scannable files are read.** The collector parses `.sql`, source
+  (`.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs`), `.json` config, and `.env*`, and it
+  **excludes vendored and generated files** — `node_modules`/`vendor` dirs,
+  lockfiles, `*.min.js`, source maps, and `.env.example`-style templates — which
+  never count toward a scan. It sizes each read file (default 1 MiB) and caps the
+  file count (default 5000); a skipped **scannable** file marks the scan
+  incomplete rather than passing silently.
+- **Secrets are masked, never echoed.** The source rules report the claim
+  (`role: service_role`, the matched format, the variable name) and a **length**;
+  the credential value is never placed in evidence, JSON, or SARIF. Control and
+  bidirectional/zero-width characters in scanned text are neutralized on output so
+  attacker-controlled strings cannot spoof a terminal or reorder displayed code.
 
 ## Development
 
@@ -93,9 +150,11 @@ Requires Node.js 20+.
 
 ```bash
 pnpm install --frozen-lockfile   # install from the committed lockfile
-pnpm test                        # run the engine test suite
+pnpm test                        # run the engine + CLI test suite
 pnpm typecheck                   # tsc --noEmit
 pnpm lint                        # eslint
+pnpm build:cli                   # compile the CLI to dist/ (CommonJS)
+node dist/cli/bin.js fixtures/insecure   # scan a sample project (exit 1)
 pnpm build                       # next build
 ```
 
