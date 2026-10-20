@@ -4,7 +4,9 @@
 // to the scanned project. Rule IDs come from a fixed allowlist (no dynamic
 // dispatch); a rule is a named function, never a string looked up at runtime.
 
-export type Severity = "high" | "medium" | "low" | "info";
+// `critical` is reserved for a confirmed service_role credential in client-
+// reachable code — a full RLS bypass, worse than the SQL misconfigurations.
+export type Severity = "critical" | "high" | "medium" | "low" | "info";
 
 // The fixed rule allowlist. SQL rules (1-5) operate on the parsed, ordered
 // schema state; source rules (6-7) operate on raw file text and land in slice 3.
@@ -50,6 +52,13 @@ export interface ScannedFile {
 // sees the whole migration set at once because RLS enablement, a policy, or a
 // view can be defined in a different file than the table it governs.
 export type SchemaRule = (state: SchemaState) => Finding[];
+
+// A text rule is a pure function over the raw content of the files that were read.
+// The secret-detection rules (KEY_SERVICE_ROLE_CLIENT, SECRET_COMMITTED) do not
+// parse SQL — they pattern-match source and env text — so they take files
+// directly and scope themselves (see scope.ts). Like schema rules they are named
+// functions, never a string looked up at runtime.
+export type TextRule = (files: ScannedFile[]) => Finding[];
 
 export interface TableState {
   qualified: string; // display name, e.g. "public.todos"

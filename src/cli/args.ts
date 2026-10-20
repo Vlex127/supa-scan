@@ -19,7 +19,8 @@ A pre-deploy, CI-friendly static security scanner for Supabase projects.
 
 Options:
   --format json|sarif   Output format (default: json).
-  --fail-on <severity>  Minimum severity that triggers exit 1: high|medium|low|info
+  --fail-on <severity>  Minimum severity that triggers exit 1:
+                        critical|high|medium|low|info
                         (default: info — any finding fails the gate).
   -h, --help            Show this help and exit 0.
   --version             Print the version and exit 0.
@@ -75,7 +76,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         format = value;
       } else {
         if (!isSeverity(value)) {
-          return usageError(`invalid --fail-on: ${value} (expected high, medium, low or info)`);
+          return usageError(
+            `invalid --fail-on: ${value} (expected critical, high, medium, low or info)`,
+          );
         }
         failOn = value;
       }

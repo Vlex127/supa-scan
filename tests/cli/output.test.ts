@@ -85,7 +85,11 @@ describe("toSarif", () => {
     const ids = driver.rules.map((r: { id: string }) => r.id);
     expect(ids).toEqual(implementedRuleIds());
     expect(ids).not.toContain("PARSE_FAILED");
-    expect(ids).not.toContain("KEY_SERVICE_ROLE_CLIENT"); // not yet implemented
+    // Slice 3 shipped the source rules, so they are now advertised (and PARSE_FAILED
+    // still is not). implementedRuleIds() is the single source of truth for this.
+    expect(ids).toContain("KEY_SERVICE_ROLE_CLIENT");
+    expect(ids).toContain("SECRET_COMMITTED");
+    expect(driver.rules).toHaveLength(7);
     // results = the two findings only; the parse failure is NOT a result.
     const results = sarif.runs[0].results;
     expect(results).toHaveLength(2);

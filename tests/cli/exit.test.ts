@@ -31,20 +31,25 @@ describe("meetsThreshold", () => {
 });
 
 describe("isSeverity", () => {
-  it("accepts the four severities", () => {
-    for (const s of ["high", "medium", "low", "info"]) expect(isSeverity(s)).toBe(true);
+  it("accepts the five severities", () => {
+    for (const s of ["critical", "high", "medium", "low", "info"]) expect(isSeverity(s)).toBe(true);
   });
   it("rejects anything else", () => {
-    expect(isSeverity("critical")).toBe(false);
     expect(isSeverity("HIGH")).toBe(false);
+    expect(isSeverity("urgent")).toBe(false);
+    expect(isSeverity("block")).toBe(false);
   });
 });
 
 describe("countAtOrAbove", () => {
-  const findings = [finding("high"), finding("low")];
+  const findings = [finding("critical"), finding("high"), finding("low")];
   it("counts only findings at or above the gate", () => {
-    expect(countAtOrAbove(findings, "high")).toBe(1);
-    expect(countAtOrAbove(findings, "low")).toBe(2);
+    expect(countAtOrAbove(findings, "high")).toBe(2);
+    expect(countAtOrAbove(findings, "low")).toBe(3);
+  });
+  it("ranks critical at or above every gate", () => {
+    expect(countAtOrAbove([finding("critical")], "critical")).toBe(1);
+    expect(countAtOrAbove([finding("high")], "critical")).toBe(0);
   });
 });
 

@@ -28,6 +28,7 @@ describe("parseArgs", () => {
   it("parses --fail-on both with space and with equals", () => {
     expect(runOpts(["--fail-on", "high"]).failOn).toBe("high");
     expect(runOpts(["--fail-on=low"]).failOn).toBe("low");
+    expect(runOpts(["--fail-on", "critical"]).failOn).toBe("critical");
   });
 
   it("recognizes help and version", () => {
@@ -46,7 +47,8 @@ describe("parseArgs", () => {
   });
 
   it("flags an invalid --fail-on value", () => {
-    expect(parseArgs(["--fail-on", "critical"]).kind).toBe("usageError");
+    expect(parseArgs(["--fail-on", "urgent"]).kind).toBe("usageError");
+    expect(parseArgs(["--fail-on", "Critical"]).kind).toBe("usageError");
   });
 
   it("flags a missing option value", () => {

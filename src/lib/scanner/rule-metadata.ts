@@ -72,8 +72,8 @@ export const RULE_METADATA: Record<RuleId, RuleDescriptor> = {
     shortDescription: "A service_role key appears in code reachable by a client.",
     fullDescription:
       "The service_role key (or its sb_secret_/sbp_ successors) bypasses row-level security entirely and must never ship to a browser or mobile client. Detected via NEXT_PUBLIC_ variable names, references in \"use client\" files, and any JWT literal whose decoded payload has role: service_role.",
-    defaultSeverity: "high",
-    status: "planned",
+    defaultSeverity: "critical",
+    status: "implemented",
   },
   SECRET_COMMITTED: {
     id: "SECRET_COMMITTED",
@@ -82,7 +82,7 @@ export const RULE_METADATA: Record<RuleId, RuleDescriptor> = {
     fullDescription:
       "A service_role JWT, an sb_secret_/sbp_ Supabase key, a PEM private key, or a key-like assignment in a .env file carries a credential. Evidence is masked; the secret value is never echoed. This rule targets Supabase-specific formats; general secret scanning is gitleaks' job.",
     defaultSeverity: "high",
-    status: "planned",
+    status: "implemented",
   },
   PARSE_FAILED: {
     id: "PARSE_FAILED",
@@ -96,6 +96,7 @@ export const RULE_METADATA: Record<RuleId, RuleDescriptor> = {
 };
 
 export const SARIF_LEVEL: Record<Severity, "error" | "warning" | "note"> = {
+  critical: "error",
   high: "error",
   medium: "warning",
   low: "note",
@@ -103,6 +104,7 @@ export const SARIF_LEVEL: Record<Severity, "error" | "warning" | "note"> = {
 };
 
 export const SECURITY_SEVERITY: Record<Severity, string> = {
+  critical: "9.1",
   high: "8.0",
   medium: "5.5",
   low: "3.5",

@@ -1,9 +1,15 @@
 import type { Finding, Severity } from "../lib/scanner/types";
 
 // Higher rank = more severe. Drives --fail-on comparison and stable ordering.
-const RANK: Record<Severity, number> = { high: 3, medium: 2, low: 1, info: 0 };
+const RANK: Record<Severity, number> = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+  info: 0,
+};
 
-export const SEVERITIES: readonly Severity[] = ["high", "medium", "low", "info"];
+export const SEVERITIES: readonly Severity[] = ["critical", "high", "medium", "low", "info"];
 
 export function isSeverity(value: string): value is Severity {
   return (SEVERITIES as readonly string[]).includes(value);

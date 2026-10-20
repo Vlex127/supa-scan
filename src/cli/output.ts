@@ -37,7 +37,7 @@ interface Summary {
 }
 
 function summarize(report: ScanReport): Summary {
-  const bySeverity: Record<Severity, number> = { high: 0, medium: 0, low: 0, info: 0 };
+  const bySeverity: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
   const byRule: Record<string, number> = {};
   for (const f of report.result.findings) {
     bySeverity[f.severity] += 1;
