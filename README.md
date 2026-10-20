@@ -29,17 +29,19 @@ CI exit codes. A client-side demo UI is the next milestone.
 | `VIEW_NO_SECURITY_INVOKER` | medium | A view created without `security_invoker` (runs as its owner, bypassing the base table's RLS). |
 | `SECDEF_NO_SEARCH_PATH` | high | A `SECURITY DEFINER` function without a fixed `search_path` (hijackable via a shadowing object). |
 | `KEY_SERVICE_ROLE_CLIENT` | **critical** / high | A `service_role` credential in client-reachable code: a `NEXT_PUBLIC_*` name mentioning `SERVICE_ROLE`/`SECRET` (high), a service-role reference inside a `"use client"` module (high), or a JWT literal whose **decoded payload** asserts `role: service_role` (critical). |
-| `SECRET_COMMITTED` | high | Supabase-specific committed secrets: an `sb_secret_*`/`sbp_*` key, a PEM private-key block, a service-role JWT in a `.env` file, or a key-like `.env` assignment. Evidence is **masked** — never the secret. |
+| `SECRET_COMMITTED` | high | Supabase-specific committed secrets: an `sb_secret_*`/`sbp_*` key, a PEM private-key block, or a service-role JWT in a `.env` file **or `.env` template**; plus a key-like assignment in a **real** `.env` (templates skip that generic check so placeholders stay quiet). Evidence is **masked** — never the secret. |
 
 The `critical` tier is reserved for a confirmed `service_role` credential in client
 code (a full RLS bypass). Severity order is `critical > high > medium > low > info`.
 
 The five SQL rules run on the parsed, ordered schema state. The two source rules
 run on raw **text** (`.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs`/`.json` and `.env*`)
-and scope themselves; they decode JWT payloads with a dependency-free, browser-
-portable base64url decoder and **never** verify signatures (a leaked key is
-dangerous whatever its signature). The `anon` key is the public, logged-out role
-and is never flagged — `sb_publishable_*` and a `role: anon` payload are expected.
+and scope themselves; they decode JWT payloads with the standard `atob` +
+`TextDecoder` globals (present in Node 20+ and the browser) and **never** verify
+signatures (a leaked key is dangerous whatever its signature). Long lines are
+scanned in **overlapping chunks** rather than skipped, so a credential can't hide
+past an arbitrary cut. The `anon` key is the public, logged-out role and is never
+flagged — `sb_publishable_*` and a `role: anon` payload are expected.
 
 Rules are a fixed allowlist of pure functions. There is no `eval`, no dynamic
 dispatch of scanned content, and no network access at scan time.
@@ -124,25 +126,35 @@ or rely on GitHub's push protection alongside supa-scan.
   migration paths above is not seen by a static scan. A clean result means "the
   scanned files look correct," not "the deployed database is safe."
 - **Unparseable files are never silently skipped.** A file the parser cannot read
-  (e.g. a newer grammar than libpg-query supports) is reported as a
-  `PARSE_FAILED` entry and the scan is marked **incomplete** — the scanner will
-  not certify input it could not analyze.
+  (e.g. a newer grammar than libpg-query supports) is reported as a `PARSE_FAILED`
+  entry — its file, the line at the parser's cursor, and a **fixed category**
+  (`syntax_error`, `unterminated_string`, …) — and the scan is marked **incomplete**;
+  the scanner will not certify input it could not analyze. The parser's own message
+  is never carried: Postgres interpolates the offending token (an unterminated string
+  echoes its contents), so a raw message could surface attacker text or a credential
+  sitting in broken SQL.
 - **Not a replacement for RLS itself or the Security Advisor.** Enabling RLS on a
   table with no policies denies access by default (safe but possibly broken);
   correct policies still need authoring. Use supa-scan in CI **alongside** the
   live Security Advisor.
-- **Only scannable files are read.** The collector parses `.sql`, source
-  (`.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs`), `.json` config, and `.env*`, and it
-  **excludes vendored and generated files** — `node_modules`/`vendor` dirs,
-  lockfiles, `*.min.js`, source maps, and `.env.example`-style templates — which
-  never count toward a scan. It sizes each read file (default 1 MiB) and caps the
-  file count (default 5000); a skipped **scannable** file marks the scan
-  incomplete rather than passing silently.
+- **Only scannable files are read.** The collector reads `.sql`, source
+  (`.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs`), `.json` config, and `.env*` **including
+  `.env.example`-style templates** (a template can still hold a real credential), and
+  it **excludes vendored and generated files** — `node_modules`/`vendor` dirs,
+  lockfiles, `*.min.js`, and source maps — which never count toward a scan. It sizes
+  each read file (default 1 MiB) and caps the file count (default 5000); a skipped
+  **scannable** file marks the scan incomplete rather than passing silently.
 - **Secrets are masked, never echoed.** The source rules report the claim
   (`role: service_role`, the matched format, the variable name) and a **length**;
   the credential value is never placed in evidence, JSON, or SARIF. Control and
   bidirectional/zero-width characters in scanned text are neutralized on output so
   attacker-controlled strings cannot spoof a terminal or reorder displayed code.
+- **Long lines are chunk-scanned, not skipped.** A source line longer than the chunk
+  window (8192 chars) is scanned in overlapping windows (4096-char overlap), so no
+  line is silently skipped and any credential no longer than the overlap is always
+  covered whole in some window. Real Supabase secrets and JWTs are far shorter than
+  that; only a >8 KB token could in principle straddle a window — not a credible
+  credential.
 
 ## Development
 
