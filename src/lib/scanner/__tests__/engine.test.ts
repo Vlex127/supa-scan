@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { runScan } from "../index";
@@ -393,8 +394,9 @@ describe("scanner robustness", () => {
   it("classifies an unterminated quoted string, places it by line, and echoes nothing", async () => {
     // A secret-shaped value sitting in a broken statement is exactly what a raw
     // parser message would echo. The engine must classify the failure into a fixed
-    // category and never carry the offending text anywhere in the result.
-    const leak = "LEAKCHECK_PLACEHOLDER";
+    // category and never carry the offending text anywhere in the result. The value
+    // is assembled at runtime so no secret-shaped literal is ever committed.
+    const leak = `sb_secret_${randomBytes(9).toString("hex")}`;
     const result = await runScan(
       files([
         "supabase/migrations/0003.sql",
