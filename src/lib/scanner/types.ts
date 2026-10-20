@@ -107,6 +107,19 @@ export interface SchemaState {
   functions: FunctionState[];
 }
 
+// A coarse, FIXED classification of why a file failed to parse. We deliberately do
+// not carry the parser's own message: Postgres echoes the offending token in errors
+// like `unterminated quoted string at or near "'<secret>'"`, so a raw message could
+// surface attacker-controlled content (or a credential sitting in the broken SQL).
+// A category from this closed allowlist is the only parse-failure detail we emit.
+export type ParseErrorCategory =
+  | "syntax_error"
+  | "unterminated_string"
+  | "unterminated_comment"
+  | "unterminated_dollar_quote"
+  | "invalid_input"
+  | "parse_error";
+
 // A file the scanner could not parse. It is reported alongside (never folded
 // into) real findings, and forces the scan to be incomplete: the scanner cannot
 // certify what it could not read, and an unparsed migration may be exactly the
@@ -115,8 +128,8 @@ export interface ParseFailure {
   ruleId: "PARSE_FAILED";
   severity: Severity;
   file: string;
-  line: number;
-  message: string;
+  line: number; // 1-based, derived from the parser's cursor position when available
+  category: ParseErrorCategory;
 }
 
 // The full result of a scan. `complete` is false when any input was skipped, so

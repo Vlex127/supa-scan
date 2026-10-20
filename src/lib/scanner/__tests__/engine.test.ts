@@ -384,8 +384,31 @@ describe("scanner robustness", () => {
     expect(result.parseFailures).toHaveLength(1);
     expect(result.parseFailures[0].ruleId).toBe("PARSE_FAILED");
     expect(result.parseFailures[0].file).toBe("supabase/migrations/0002.sql");
+    expect(result.parseFailures[0].category).toBe("syntax_error");
+    expect(result.parseFailures[0].line).toBe(1);
     // the other file is still analyzed
     expect(result.findings.map((f) => f.object)).toContain("public.todos");
+  });
+
+  it("classifies an unterminated quoted string, places it by line, and echoes nothing", async () => {
+    // A secret-shaped value sitting in a broken statement is exactly what a raw
+    // parser message would echo. The engine must classify the failure into a fixed
+    // category and never carry the offending text anywhere in the result.
+    const leak = "LEAKCHECK_PLACEHOLDER";
+    const result = await runScan(
+      files([
+        "supabase/migrations/0003.sql",
+        `-- comment\nselect 1;\nselect '${leak}`,
+      ]),
+    );
+    expect(result.complete).toBe(false);
+    expect(result.parseFailures).toHaveLength(1);
+    expect(result.parseFailures[0].category).toBe("unterminated_string");
+    expect(result.parseFailures[0].line).toBe(3); // derived from the parser cursor
+    // The failure carries no free-text message field, and the credential appears
+    // nowhere in the serializable result.
+    expect(result.parseFailures[0]).not.toHaveProperty("message");
+    expect(JSON.stringify(result)).not.toContain(leak);
   });
 
   it("empty and whitespace-only SQL never crash", async () => {

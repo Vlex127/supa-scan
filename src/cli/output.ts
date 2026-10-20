@@ -1,4 +1,10 @@
-import type { Finding, ParseFailure, ScanResult, Severity } from "../lib/scanner/types";
+import type {
+  Finding,
+  ParseErrorCategory,
+  ParseFailure,
+  ScanResult,
+  Severity,
+} from "../lib/scanner/types";
 import type { SkippedFile, SkipReason } from "./collect";
 import {
   RULE_METADATA,
@@ -26,6 +32,18 @@ export interface ScanReport {
 
 const SKIP_REASONS: readonly SkipReason[] = ["size", "count", "binary", "symlink", "unreadable"];
 const NOTIFY_CAP = 50; // enumerated parse-failure notifications before a rollup
+
+// Fixed, human-readable phrasing for each parse-failure category. The map's keys are
+// the closed ParseErrorCategory set, so a notification never interpolates parser-
+// supplied text (which can echo a quoted credential sitting in broken SQL).
+const PARSE_CATEGORY_PHRASE: Record<ParseErrorCategory, string> = {
+  syntax_error: "syntax error",
+  unterminated_string: "unterminated quoted string",
+  unterminated_comment: "unterminated block comment",
+  unterminated_dollar_quote: "unterminated dollar-quoted string",
+  invalid_input: "invalid input syntax",
+  parse_error: "could not be parsed",
+};
 
 interface Summary {
   total: number;
@@ -74,7 +92,9 @@ function emitParseFailure(p: ParseFailure): Record<string, unknown> {
     severity: p.severity,
     file: sanitizeText(p.file),
     line: p.line,
-    message: sanitizeText(p.message),
+    // `category` is from a closed allowlist (never parser-supplied text), so it is
+    // emitted as-is; the file path is still sanitized because it comes from input.
+    category: p.category,
   };
 }
 
@@ -115,7 +135,7 @@ function parseFailureNotification(p: ParseFailure): Record<string, unknown> {
   return {
     descriptor: { id: "supa-scan/parse-failure" },
     level: "error",
-    message: { text: sanitizeText(`${p.file}: ${p.message}`) },
+    message: { text: sanitizeText(`${p.file}: ${PARSE_CATEGORY_PHRASE[p.category]}`) },
     locations: [
       {
         physicalLocation: {

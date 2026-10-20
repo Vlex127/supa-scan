@@ -35,7 +35,7 @@ function sampleScanResult(): ScanResult {
         severity: "high",
         file: "supabase/migrations/0003.sql",
         line: 1,
-        message: "could not parse: syntax error",
+        category: "syntax_error",
       },
     ],
   };
@@ -63,6 +63,8 @@ describe("formatJson", () => {
     expect(parsed.summary.skipped).toBe(1);
     expect(parsed.findings[0].ruleId).toBe("RLS_DISABLED");
     expect(parsed.parseFailures[0].ruleId).toBe("PARSE_FAILED");
+    expect(parsed.parseFailures[0].category).toBe("syntax_error");
+    expect(parsed.parseFailures[0].message).toBeUndefined();
     expect(parsed.skipped[0].path).toBe("big.sql");
     expect(formatJson(report())).toBe(text); // byte-stable
   });

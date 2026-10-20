@@ -1,6 +1,7 @@
 import { parse } from "libpg-query";
 import type {
   FunctionState,
+  ParseErrorCategory,
   ParseFailure,
   PolicyState,
   RoleRef,
@@ -54,8 +55,8 @@ export async function buildSchema(files: ScannedFile[]): Promise<SchemaBuild> {
         ruleId: "PARSE_FAILED",
         severity: "high",
         file: file.path,
-        line: 1,
-        message: `could not parse: ${String(error instanceof Error ? error.message : error).slice(0, 200)}`,
+        line: parseErrorLine(file.content, error),
+        category: parseErrorCategory(error),
       });
       continue;
     }
@@ -76,6 +77,39 @@ export async function buildSchema(files: ScannedFile[]): Promise<SchemaBuild> {
     },
     parseFailures,
   };
+}
+
+// libpg-query throws a SqlError whose `sqlDetails` carries the original parser
+// message and an absolute `cursorPosition` into the input. We use those two — and
+// nothing else — to place and classify the failure. The message itself is never
+// stored: Postgres interpolates the offending token (e.g. an unterminated quoted
+// string echoes its contents), so surfacing it could leak attacker-controlled text
+// or a credential sitting inside the broken SQL. We map it onto a closed category.
+function parserMessage(error: unknown): string {
+  if (error && typeof error === "object") {
+    const details = (error as { sqlDetails?: { message?: unknown } }).sqlDetails;
+    if (typeof details?.message === "string") return details.message;
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+  }
+  return "";
+}
+
+function parseErrorLine(content: string, error: unknown): number {
+  if (!error || typeof error !== "object") return 1;
+  const cursor = (error as { sqlDetails?: { cursorPosition?: unknown } }).sqlDetails
+    ?.cursorPosition;
+  return typeof cursor === "number" ? lineFromOffset(content, cursor) : 1;
+}
+
+function parseErrorCategory(error: unknown): ParseErrorCategory {
+  const message = parserMessage(error);
+  if (message.startsWith("syntax error")) return "syntax_error";
+  if (message.startsWith("unterminated dollar-quoted string")) return "unterminated_dollar_quote";
+  if (message.startsWith("unterminated quoted string")) return "unterminated_string";
+  if (message.startsWith("unterminated /* comment")) return "unterminated_comment";
+  if (message.startsWith("invalid input syntax")) return "invalid_input";
+  return "parse_error";
 }
 
 interface Ctx {
