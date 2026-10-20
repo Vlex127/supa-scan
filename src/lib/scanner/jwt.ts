@@ -1,10 +1,12 @@
 // JWT-shaped token detection for the source rules.
 //
-// We deliberately avoid `Buffer` and the global `TextDecoder`: the scanner engine
-// must stay runnable in a browser (the demo UI runs it client-side), and base64url
-// decoding plus UTF-8 decoding are only a few dozen lines. We never verify
-// signatures — that would be pointless, and a secret-bearing token is dangerous
-// whatever its signature — we only decode the payload to read its `role` claim.
+// We decode a token's payload with the standard Web-API primitives — `atob` for
+// base64 and a fatal-mode `TextDecoder` for UTF-8 — both of which exist as globals
+// in Node 20+ and in the browser (where the demo UI runs the engine). A fatal
+// decoder rejects malformed UTF-8, so bad input degrades to "not decodable" rather
+// than a crash or a misleading string. We never verify signatures — that would be
+// pointless, and a secret-bearing token is dangerous whatever its signature — we
+// only decode the payload to read its `role` claim.
 
 export interface DecodedJwt {
   token: string; // the full token — NEVER surfaced as evidence or reported back
@@ -12,90 +14,33 @@ export interface DecodedJwt {
   payload: Record<string, unknown> | null;
 }
 
-// RFC 7515/7519 base64url alphabet, encoded as a value array so an invalid byte
-// reads as 0xFF (below) instead of the value 0 it would get from a missing key.
-const B64 = new Uint8Array(256).fill(0xff);
-{
-  const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-  for (let i = 0; i < ALPHABET.length; i++) {
-    B64[ALPHABET.charCodeAt(i)] = i;
+// Decode one base64url segment (no padding, `-`/`_` alphabet) into a UTF-8 string.
+// Returns null on any failure — a bad length, a non-base64 character (atob throws),
+// or invalid UTF-8 (the fatal TextDecoder throws) — so a caller treats "undecodable"
+// uniformly as "not a token we can read."
+function base64urlToUtf8(segment: string): string | null {
+  const b64 = segment.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+  let binary: string;
+  try {
+    binary = atob(padded);
+  } catch {
+    return null;
   }
-}
-
-function base64urlToBytes(input: string): Uint8Array | null {
-  let bitBuffer = 0;
-  let bitCount = 0;
-  const out: number[] = [];
-  for (let i = 0; i < input.length; i++) {
-    const code = input.charCodeAt(i);
-    const value = code < B64.length ? B64[code] : 0xff;
-    if (value === 0xff) {
-      // '=' padding is legal at the tail of some tokens; anything else is invalid.
-      if (code === 0x3d /* = */) continue;
-      return null;
-    }
-    bitBuffer = (bitBuffer << 6) | value;
-    bitCount += 6;
-    if (bitCount >= 8) {
-      bitCount -= 8;
-      out.push((bitBuffer >> bitCount) & 0xff);
-    }
+  const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
   }
-  return new Uint8Array(out);
-}
-
-// Minimal, strict-enough UTF-8 decoder. Malformed or truncated sequences yield
-// U+FFFD, which JSON.parse then rejects — so bad input degrades to "not decodable"
-// rather than a crash or a misleading string.
-function utf8Decode(bytes: Uint8Array): string {
-  let out = "";
-  let i = 0;
-  while (i < bytes.length) {
-    const b0 = bytes[i];
-    if (b0 < 0x80) {
-      out += String.fromCharCode(b0);
-      i += 1;
-      continue;
-    }
-    if (b0 >= 0xc2 && b0 <= 0xdf && i + 1 < bytes.length) {
-      const b1 = bytes[i + 1];
-      if ((b1 & 0xc0) === 0x80) {
-        out += String.fromCharCode(((b0 & 0x1f) << 6) | (b1 & 0x3f));
-        i += 2;
-        continue;
-      }
-    } else if (b0 >= 0xe0 && b0 <= 0xef && i + 2 < bytes.length) {
-      const b1 = bytes[i + 1];
-      const b2 = bytes[i + 2];
-      if ((b1 & 0xc0) === 0x80 && (b2 & 0xc0) === 0x80) {
-        out += String.fromCharCode(((b0 & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f));
-        i += 3;
-        continue;
-      }
-    } else if (b0 >= 0xf0 && b0 <= 0xf4 && i + 3 < bytes.length) {
-      const b1 = bytes[i + 1];
-      const b2 = bytes[i + 2];
-      const b3 = bytes[i + 3];
-      if ((b1 & 0xc0) === 0x80 && (b2 & 0xc0) === 0x80 && (b3 & 0xc0) === 0x80) {
-        const cp =
-          ((b0 & 0x07) << 18) | ((b1 & 0x3f) << 12) | ((b2 & 0x3f) << 6) | (b3 & 0x3f);
-        out += String.fromCodePoint(cp);
-        i += 4;
-        continue;
-      }
-    }
-    out += "\uFFFD"; // replacement character for a malformed sequence
-    i += 1;
-  }
-  return out;
 }
 
 function decodeObject(segment: string): Record<string, unknown> | null {
-  const bytes = base64urlToBytes(segment);
-  if (bytes === null) return null;
+  const text = base64urlToUtf8(segment);
+  if (text === null) return null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(utf8Decode(bytes));
+    parsed = JSON.parse(text);
   } catch {
     return null;
   }
