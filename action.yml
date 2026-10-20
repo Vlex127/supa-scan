@@ -1,0 +1,69 @@
+name: "supa-scan"
+description: "Static security scan for Supabase projects: parse migrations with the real Postgres parser, run the fixed rule set, emit SARIF and upload it to GitHub code scanning."
+author: "Vlex127"
+branding:
+  icon: shield
+  color: red
+inputs:
+  path:
+    description: "Project root to scan, relative to the workspace (default: the checked-out repo)."
+    required: false
+    default: "."
+  fail-on:
+    description: "Lowest severity that fails the run: critical | high | medium | low | info."
+    required: false
+    default: "high"
+  sarif:
+    description: "File name (written to the workspace) for the SARIF report."
+    required: false
+    default: "supa-scan-results.sarif"
+runs:
+  using: "composite"
+  steps:
+    - name: Set up pnpm (Corepack, pinned by the action's packageManager)
+      shell: bash
+      env:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      run: |
+        corepack enable
+        corepack prepare pnpm@11.24.0 --activate
+
+    - name: Install supa-scan dependencies (frozen, no build scripts)
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      run: pnpm install --frozen-lockfile --ignore-scripts
+
+    - name: Build the supa-scan CLI
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      run: pnpm run build:cli
+
+    - name: Run supa-scan
+      shell: bash
+      run: |
+        # Capture the exit code so the SARIF is always uploaded, then fail at the gate.
+        set +e
+        node "${{ github.action_path }}/dist/cli/bin.js" "${{ inputs.path }}" \
+          --format sarif --fail-on "${{ inputs.fail-on }}" > "${{ inputs.sarif }}"
+        code=$?
+        set -e
+        echo "supa_scan_exit=$code" >> "$GITHUB_ENV"
+        echo "supa-scan exited $code (0 clean · 1 findings at/above --fail-on · 2 usage/tool error or incomplete scan)"
+
+    - name: Upload SARIF
+      if: always()
+      uses: github/codeql-action/upload-sarif@ce5e7eeac396d720fe2d802714996c8ce561e311 # v3.39.0
+      with:
+        sarif_file: ${{ inputs.sarif }}
+        category: supa-scan
+
+    - name: Fail the run if supa-scan found issues
+      if: env.supa_scan_exit != '0'
+      shell: bash
+      run: |
+        echo "supa-scan exited ${{ env.supa_scan_exit }} — findings at/above --fail-on, or an incomplete/erroring scan. See the SARIF in the Security tab."
+        exit 1
