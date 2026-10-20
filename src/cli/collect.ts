@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { runScan } from "../lib/scanner";
 import type { ScanResult, ScannedFile } from "../lib/scanner/types";
+import { isScannable, isVendoredFile } from "../lib/scanner/scope";
 
 export class UsageError extends Error {}
 
@@ -42,16 +43,14 @@ export interface CollectionResult {
   inputIncomplete: boolean;
 }
 
-const EXCLUDED_DIRS = new Set(["node_modules", ".git", ".next", ".turbo"]);
+const EXCLUDED_DIRS = new Set(["node_modules", "vendor", "third_party", ".git", ".next", ".turbo"]);
 const MAX_SKIP_SAMPLE = 1000;
 
-// File types the current rule set actually reads. Slice 2 runs SQL rules only, so
-// only `.sql` is scannable; slice 3 adds source/secret rules and widens this set,
-// which simultaneously makes size/count skips of source files mark a scan
-// incomplete (the "skipped means incomplete" rule, applied to source too).
-function isScannable(path: string): boolean {
-  return path.toLowerCase().endsWith(".sql");
-}
+// isScannable / isVendoredFile come from the shared scope module, so the collector
+// and the source rules can never disagree about which files count. Widening scope to
+// source/env files is also what makes a size/count/symlink skip of a SOURCE file mark
+// the scan incomplete — the same "skipped means incomplete" rule now covers slice-3
+// inputs, not just SQL.
 
 // A NUL byte in the first 8 KiB marks a binary blob. Real SQL / source text never
 // contains one; this avoids reading or emitting megabytes of junk.
@@ -91,11 +90,11 @@ export function collectFiles(root: string, caps: Caps = DEFAULT_CAPS): Collectio
     const rel = relative(absRoot, full);
     return sep === "/" ? rel : rel.split(sep).join("/");
   };
-  const drop = (full: string, reason: SkipReason): void => {
-    if (isScannable(relOf(full))) inputIncomplete = true;
+  const drop = (rel: string, reason: SkipReason): void => {
+    if (isScannable(rel)) inputIncomplete = true;
     skipCounts[reason] += 1;
     skippedTotal += 1;
-    if (skipped.length < MAX_SKIP_SAMPLE) skipped.push({ path: relOf(full), reason });
+    if (skipped.length < MAX_SKIP_SAMPLE) skipped.push({ path: rel, reason });
   };
 
   const visit = (dir: string): void => {
@@ -112,8 +111,18 @@ export function collectFiles(root: string, caps: Caps = DEFAULT_CAPS): Collectio
     for (const entry of entries) {
       const full = join(dir, entry.name);
       if (EXCLUDED_DIRS.has(entry.name)) continue; // never a path out of the project
+      const rel = relOf(full);
+      // An entry is "of interest" only if a rule could actually analyze it: a
+      // scannable extension (SQL, source, env) that is not vendored/generated. We
+      // read ONLY those, so non-input files (images, docs) are never read into memory
+      // and never consume the file cap. A skip is therefore always a scannable file
+      // we intended but could not analyze — which is exactly what marks a scan
+      // incomplete.
+      const interesting = isScannable(rel) && !isVendoredFile(rel);
       if (entry.isSymbolicLink()) {
-        drop(full, "symlink"); // we never follow symlinks out of the root
+        // We never follow symlinks out of the root. A symlink standing in for a real
+        // input is a gap we cannot read, so it counts (and makes the scan incomplete).
+        if (interesting) drop(rel, "symlink");
         continue;
       }
       if (entry.isDirectory()) {
@@ -121,26 +130,27 @@ export function collectFiles(root: string, caps: Caps = DEFAULT_CAPS): Collectio
         continue;
       }
       if (!entry.isFile()) continue; // sockets, fifos, devices
+      if (!interesting) continue; // not our input: ignored, never read, never a skip
       if (files.length >= caps.maxFiles) {
-        drop(full, "count");
+        drop(rel, "count");
         continue;
       }
       let buffer: Buffer;
       try {
         buffer = readFileSync(full);
       } catch {
-        drop(full, "unreadable");
+        drop(rel, "unreadable");
         continue;
       }
       if (buffer.length > caps.maxFileSizeBytes) {
-        drop(full, "size");
+        drop(rel, "size");
         continue;
       }
       if (looksBinary(buffer)) {
-        drop(full, "binary");
+        drop(rel, "binary");
         continue;
       }
-      files.push({ path: relOf(full), content: buffer.toString("utf8") });
+      files.push({ path: rel, content: buffer.toString("utf8") });
     }
   };
 

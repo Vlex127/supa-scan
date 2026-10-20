@@ -72,13 +72,26 @@ describe("collectFiles", () => {
     expect(result.inputIncomplete).toBe(true);
   });
 
-  it("skips binary files (a NUL byte) without marking schema incomplete", () => {
+  it("ignores non-scannable files entirely — never read, never a skip, not incomplete", () => {
     write("notes.sql", "select 1;");
+    write("README.md", "# docs");
     write("blob.dat", Buffer.from([0x61, 0x00, 0x62]));
     const result = collectFiles(root, BIG);
     expect(result.files.map((f) => f.path)).toEqual(["notes.sql"]);
-    expect(result.skipped.some((s) => s.path === "blob.dat" && s.reason === "binary")).toBe(true);
+    // .md and .dat are not our input, so they are not even recorded as skips.
+    expect(result.skipped).toHaveLength(0);
     expect(result.inputIncomplete).toBe(false);
+  });
+
+  it("skips a scannable-extension file whose bytes are binary and marks the scan incomplete", () => {
+    write("good.sql", "select 1;");
+    write("corrupt.sql", Buffer.from([0x73, 0x00, 0x65])); // NUL in a .sql
+    const result = collectFiles(root, BIG);
+    expect(result.files.map((f) => f.path)).toEqual(["good.sql"]);
+    expect(result.skipped.some((s) => s.path === "corrupt.sql" && s.reason === "binary")).toBe(
+      true,
+    );
+    expect(result.inputIncomplete).toBe(true); // we intended to read this SQL but could not
   });
 
   it("caps the file count and marks the scan incomplete when .sql files are pushed out", () => {
@@ -89,6 +102,45 @@ describe("collectFiles", () => {
     expect(result.files).toHaveLength(2);
     expect(result.skipped.every((s) => s.reason === "count")).toBe(true);
     expect(result.inputIncomplete).toBe(true);
+  });
+
+  it("collects source and env files as scannable input, not just SQL", () => {
+    write("app/db.ts", "export const x = 1;");
+    write("config.json", "{}");
+    write(".env", "A=1");
+    write("notes.md", "not scanned");
+    const paths = collectFiles(root, BIG).files.map((f) => f.path);
+    expect(paths).toEqual([".env", "app/db.ts", "config.json"]); // notes.md is not scannable
+  });
+
+  it("skips lockfiles and minified bundles without marking the scan incomplete", () => {
+    write("keep.sql", "select 1;");
+    write("package-lock.json", "x".repeat(10_000));
+    write("dist/app.min.js", "y".repeat(10_000));
+    write("dist/app.js.map", "{}");
+    const result = collectFiles(root, BIG);
+    expect(result.files.map((f) => f.path)).toEqual(["keep.sql"]);
+    // Vendored/generated files are excluded by design, not "skipped input".
+    expect(result.skipped).toHaveLength(0);
+    expect(result.inputIncomplete).toBe(false);
+  });
+
+  it("reads a real .env but never a .env.example template", () => {
+    write(".env", "REAL=1");
+    write(".env.example", "PLACEHOLDER=changeme");
+    const result = collectFiles(root, BIG);
+    expect(result.files.map((f) => f.path)).toEqual([".env"]);
+    expect(result.skipped).toHaveLength(0);
+    expect(result.inputIncomplete).toBe(false);
+  });
+
+  it("marks the scan incomplete when a SOURCE file is skipped for size", () => {
+    write("small.ts", "export const a = 1;");
+    write("huge.ts", "x".repeat(200));
+    const result = collectFiles(root, { maxFiles: 5000, maxFileSizeBytes: 50 });
+    expect(result.files.map((f) => f.path)).toContain("small.ts");
+    expect(result.skipped.some((s) => s.path === "huge.ts" && s.reason === "size")).toBe(true);
+    expect(result.inputIncomplete).toBe(true); // the "skipped means incomplete" rule now covers source too
   });
 
   it("throws a UsageError for a missing root or a file root", () => {
