@@ -125,11 +125,14 @@ describe("collectFiles", () => {
     expect(result.inputIncomplete).toBe(false);
   });
 
-  it("reads a real .env but never a .env.example template", () => {
+  it("reads real .env files AND .env templates (templates still hold real creds)", () => {
     write(".env", "REAL=1");
     write(".env.example", "PLACEHOLDER=changeme");
+    write("node_modules/x/.env.example", "VENDORED=1");
     const result = collectFiles(root, BIG);
-    expect(result.files.map((f) => f.path)).toEqual([".env"]);
+    // The committed template is now read as input (scanned for high-confidence
+    // detectors); a template under node_modules stays vendored/excluded.
+    expect(result.files.map((f) => f.path)).toEqual([".env", ".env.example"]);
     expect(result.skipped).toHaveLength(0);
     expect(result.inputIncomplete).toBe(false);
   });

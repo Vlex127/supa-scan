@@ -162,6 +162,32 @@ describe("SECRET_COMMITTED", () => {
     const out = secretCommitted([src(".env", `SUPABASE_SECRET_KEY=${supabaseSecretKey()}\n`)]);
     expect(out).toHaveLength(1);
   });
+
+  it("runs high-confidence detectors on a .env TEMPLATE but skips the generic name check", () => {
+    const secret = supabaseSecretKey();
+    const token = serviceRoleJwt();
+    // Real credentials pasted into a template are still caught...
+    expect(secretCommitted([src(".env.example", `KEY=${secret}\n`)]).map((f) => f.ruleId)).toEqual(
+      ["SECRET_COMMITTED"],
+    );
+    expect(secretCommitted([src(".env.example", `SUPABASE_KEY=${token}\n`)]).length).toBe(1);
+    expect(secretCommitted([src(".env.example", "P=-----BEGIN PRIVATE KEY-----\n")]).length).toBe(
+      1,
+    );
+    // ...but a placeholder on a secret-shaped name is NOT flagged (templates are
+    // meant to hold them; only the generic check is suppressed, not the formats).
+    expect(secretCommitted([src(".env.example", "API_KEY=your-key-here\n")])).toHaveLength(0);
+    expect(secretCommitted([src(".env.example", "NEXT_PUBLIC_SUPABASE_ANON_KEY=\n")])).toHaveLength(
+      0,
+    );
+  });
+
+  it("still runs the generic secret-name check on a REAL env file", () => {
+    // Same placeholder-shaped line, but in a real .env it is treated as a leak.
+    const out = secretCommitted([src(".env", "API_KEY=abcdef123456\n")]);
+    expect(out).toHaveLength(1);
+    expect(haystack(out[0])).not.toContain("abcdef123456");
+  });
 });
 
 describe("runScan integration (schema + text rules, ordering)", () => {

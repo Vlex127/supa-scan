@@ -1,5 +1,5 @@
 import type { Finding, ScannedFile, TextRule } from "../types";
-import { isSourceFile, isEnvFile } from "../scope";
+import { isSourceFile, isEnvFile, isEnvLike } from "../scope";
 import { scanChunks, clipName, describeLength } from "../masking";
 import { findServiceRoleJwtLiterals } from "../jwt";
 
@@ -8,10 +8,11 @@ import { findServiceRoleJwtLiterals } from "../jwt";
 // OWN credential formats. It fires on:
 //   * an sb_secret_* or sbp_* (personal-access-token) key — anywhere;
 //   * a PEM private-key block — anywhere;
-//   * a service_role JWT sitting in a .env file — in SOURCE files that signal is
-//     owned by KEY_SERVICE_ROLE_CLIENT (critical), so we only take the env case here
-//     to avoid double-reporting the same token;
-//   * a key-like NAME assigned a non-empty value in a .env file.
+//   * a service_role JWT sitting in an env file OR an env template — in SOURCE files
+//     that signal is owned by KEY_SERVICE_ROLE_CLIENT (critical), so we only take the
+//     env-shaped case here to avoid double-reporting the same token;
+//   * a key-like NAME assigned a non-empty value in a REAL env file only — never in a
+//     template, whose placeholder values are expected and would be pure noise.
 // Evidence never shows the value: the matched format and a length are enough.
 
 const SB_SECRET_RE = /sb_secret_[A-Za-z0-9_-]{10,}/g;
@@ -68,8 +69,9 @@ export const secretCommitted: TextRule = (files: ScannedFile[]): Finding[] => {
   const findings: Finding[] = [];
 
   for (const file of files) {
-    const env = isEnvFile(file.path);
-    if (!env && !isSourceFile(file.path)) continue;
+    const envLike = isEnvLike(file.path); // real env OR template
+    const realEnv = isEnvFile(file.path); // real env only
+    if (!envLike && !isSourceFile(file.path)) continue;
 
     for (const { line, text } of scanChunks(file.content)) {
       let formatHit = false;
@@ -104,8 +106,9 @@ export const secretCommitted: TextRule = (files: ScannedFile[]): Finding[] => {
         formatHit = true;
       }
 
-      if (env) {
-        // A service_role JWT committed in a .env file (the source-file case is KEY's).
+      if (envLike) {
+        // A service_role JWT in an env file OR template (the source-file case is
+        // KEY's). A template that accidentally holds a real token is still a leak.
         for (const token of findServiceRoleJwtLiterals(text)) {
           pushSecret(
             findings,
@@ -115,20 +118,21 @@ export const secretCommitted: TextRule = (files: ScannedFile[]): Finding[] => {
           );
           formatHit = true;
         }
+      }
 
-        // A secret-shaped variable NAME with a real value in a .env file. Skipped when
-        // a stronger format match already reported this exact line.
-        if (!formatHit) {
-          const assign = text.match(ENV_ASSIGN_RE);
-          if (assign !== null && looksLikeSecretName(assign[1]) && valueLooksPresent(assign[2])) {
-            pushSecret(
-              findings,
-              file,
-              line,
-              `Environment variable "${clipName(assign[1])}" is assigned a ${describeLength(assign[2].trim())} value that looks like a secret.`,
-              clipName(assign[1]),
-            );
-          }
+      if (realEnv && !formatHit) {
+        // A secret-shaped variable NAME with a real value in a REAL env file. Skipped
+        // in templates (placeholders would be noise) and when a stronger format match
+        // already reported this exact line.
+        const assign = text.match(ENV_ASSIGN_RE);
+        if (assign !== null && looksLikeSecretName(assign[1]) && valueLooksPresent(assign[2])) {
+          pushSecret(
+            findings,
+            file,
+            line,
+            `Environment variable "${clipName(assign[1])}" is assigned a ${describeLength(assign[2].trim())} value that looks like a secret.`,
+            clipName(assign[1]),
+          );
         }
       }
     }
