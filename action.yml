@@ -20,6 +20,11 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Set up Node.js (pnpm 11 requires Node >= 22.13)
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: "22"
+
     - name: Set up pnpm (Corepack, pinned by the action's packageManager)
       shell: bash
       env:
