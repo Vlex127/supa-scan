@@ -10,9 +10,9 @@ export interface Caps {
   maxFileSizeBytes: number;
 }
 
-// Conservative hostile-input limits. A Supabase project's tracked migrations are
-// small text files; anything past these bounds is either noise (vendored code,
-// blobs) or an attempt to exhaust the scanner's memory / time.
+// Conservative hostile-input limits. A Supabase project's tracked migrations and
+// source are small text files; anything past these bounds is either noise
+// (vendored code, blobs) or an attempt to exhaust the scanner's memory / time.
 export const DEFAULT_CAPS: Caps = {
   maxFiles: 5000,
   maxFileSizeBytes: 1024 * 1024, // 1 MiB per file
@@ -27,17 +27,29 @@ export interface SkippedFile {
 
 export interface CollectionResult {
   files: ScannedFile[];
+  // A bounded sample of skipped files plus running totals. A hostile tree with
+  // millions of files must not make us retain millions of skip records — the caps
+  // that drop those files would otherwise be defeated by the bookkeeping itself.
   skipped: SkippedFile[];
-  // True if a .sql file was dropped (oversized, symlinked, unreadable, or pushed
-  // out by the file cap): the schema state would then be missing input, so a
-  // clean result must not be reported as complete. Vendored paths like
-  // node_modules are excluded by design and never count as incomplete.
-  schemaIncomplete: boolean;
+  skippedTotal: number;
+  skipCounts: Record<SkipReason, number>;
+  // True if a file the scanner would otherwise analyze was dropped (oversized,
+  // symlinked, unreadable, or pushed out by the file cap). Such a gap means a
+  // clean result must never be reported as complete. What counts as "would
+  // analyze" is `isScannable` below, so the signal grows with the rules that
+  // exist. Vendored paths (node_modules) and never-analyzed files (images,
+  // lockfiles) are excluded by design and never count as incomplete.
+  inputIncomplete: boolean;
 }
 
 const EXCLUDED_DIRS = new Set(["node_modules", ".git", ".next", ".turbo"]);
+const MAX_SKIP_SAMPLE = 1000;
 
-function isSql(path: string): boolean {
+// File types the current rule set actually reads. Slice 2 runs SQL rules only, so
+// only `.sql` is scannable; slice 3 adds source/secret rules and widens this set,
+// which simultaneously makes size/count skips of source files mark a scan
+// incomplete (the "skipped means incomplete" rule, applied to source too).
+function isScannable(path: string): boolean {
   return path.toLowerCase().endsWith(".sql");
 }
 
@@ -65,15 +77,25 @@ export function collectFiles(root: string, caps: Caps = DEFAULT_CAPS): Collectio
 
   const files: ScannedFile[] = [];
   const skipped: SkippedFile[] = [];
-  let schemaIncomplete = false;
+  const skipCounts: Record<SkipReason, number> = {
+    size: 0,
+    count: 0,
+    binary: 0,
+    symlink: 0,
+    unreadable: 0,
+  };
+  let skippedTotal = 0;
+  let inputIncomplete = false;
 
   const relOf = (full: string): string => {
     const rel = relative(absRoot, full);
     return sep === "/" ? rel : rel.split(sep).join("/");
   };
   const drop = (full: string, reason: SkipReason): void => {
-    if (isSql(relOf(full))) schemaIncomplete = true;
-    skipped.push({ path: relOf(full), reason });
+    if (isScannable(relOf(full))) inputIncomplete = true;
+    skipCounts[reason] += 1;
+    skippedTotal += 1;
+    if (skipped.length < MAX_SKIP_SAMPLE) skipped.push({ path: relOf(full), reason });
   };
 
   const visit = (dir: string): void => {
@@ -83,8 +105,8 @@ export function collectFiles(root: string, caps: Caps = DEFAULT_CAPS): Collectio
     } catch {
       return; // an unreadable directory is simply not descended into
     }
-    // Sort for deterministic traversal so collected paths and thus output order
-    // do not depend on the filesystem's directory order.
+    // Sort for deterministic traversal, so collected paths — and thus output
+    // order — never depend on the filesystem's directory order.
     entries.sort((a, b) => a.name.localeCompare(b.name));
 
     for (const entry of entries) {
@@ -125,7 +147,7 @@ export function collectFiles(root: string, caps: Caps = DEFAULT_CAPS): Collectio
   visit(absRoot);
   files.sort((a, b) => a.path.localeCompare(b.path));
   skipped.sort((a, b) => a.path.localeCompare(b.path));
-  return { files, skipped, schemaIncomplete };
+  return { files, skipped, skippedTotal, skipCounts, inputIncomplete };
 }
 
 // Scan a directory on disk into the engine's result, plus the collector's own
@@ -143,8 +165,8 @@ export async function scanRoot(root: string, caps: Caps = DEFAULT_CAPS): Promise
   return {
     result,
     collection,
-    // A parse failure (result.complete false) or a dropped schema file both make
-    // the scan incomplete: we never certify input we could not read.
-    complete: result.complete && !collection.schemaIncomplete,
+    // A parse failure (result.complete false) or a dropped scannable file both
+    // make the scan incomplete: we never certify input we could not read.
+    complete: result.complete && !collection.inputIncomplete,
   };
 }

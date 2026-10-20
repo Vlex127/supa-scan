@@ -32,7 +32,7 @@ describe("collectFiles", () => {
     const result = collectFiles(root, BIG);
     expect(result.files.map((f) => f.path)).toEqual(["supabase/migrations/0001.sql"]);
     expect(result.files[0].content).toContain("create table");
-    expect(result.schemaIncomplete).toBe(false);
+    expect(result.inputIncomplete).toBe(false);
     expect(result.skipped).toHaveLength(0);
   });
 
@@ -51,7 +51,7 @@ describe("collectFiles", () => {
     expect(result.files.map((f) => f.path)).toEqual(["keep.sql"]);
     // Excluded dirs are not reported as skips and do not make the scan incomplete.
     expect(result.skipped).toHaveLength(0);
-    expect(result.schemaIncomplete).toBe(false);
+    expect(result.inputIncomplete).toBe(false);
   });
 
   it("does not follow symlinks, and a symlinked .sql marks the scan incomplete", () => {
@@ -60,7 +60,7 @@ describe("collectFiles", () => {
     const result = collectFiles(root, BIG);
     expect(result.files.map((f) => f.path)).toContain("real.sql");
     expect(result.skipped.some((s) => s.path === "link.sql" && s.reason === "symlink")).toBe(true);
-    expect(result.schemaIncomplete).toBe(true);
+    expect(result.inputIncomplete).toBe(true);
   });
 
   it("skips an oversized .sql and marks the scan incomplete", () => {
@@ -69,7 +69,7 @@ describe("collectFiles", () => {
     const result = collectFiles(root, { maxFiles: 5000, maxFileSizeBytes: 50 });
     expect(result.files.map((f) => f.path)).toContain("small.sql");
     expect(result.skipped.some((s) => s.path === "huge.sql" && s.reason === "size")).toBe(true);
-    expect(result.schemaIncomplete).toBe(true);
+    expect(result.inputIncomplete).toBe(true);
   });
 
   it("skips binary files (a NUL byte) without marking schema incomplete", () => {
@@ -78,7 +78,7 @@ describe("collectFiles", () => {
     const result = collectFiles(root, BIG);
     expect(result.files.map((f) => f.path)).toEqual(["notes.sql"]);
     expect(result.skipped.some((s) => s.path === "blob.dat" && s.reason === "binary")).toBe(true);
-    expect(result.schemaIncomplete).toBe(false);
+    expect(result.inputIncomplete).toBe(false);
   });
 
   it("caps the file count and marks the scan incomplete when .sql files are pushed out", () => {
@@ -88,7 +88,7 @@ describe("collectFiles", () => {
     const result = collectFiles(root, { maxFiles: 2, maxFileSizeBytes: 1024 * 1024 });
     expect(result.files).toHaveLength(2);
     expect(result.skipped.every((s) => s.reason === "count")).toBe(true);
-    expect(result.schemaIncomplete).toBe(true);
+    expect(result.inputIncomplete).toBe(true);
   });
 
   it("throws a UsageError for a missing root or a file root", () => {

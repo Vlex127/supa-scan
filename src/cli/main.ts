@@ -1,8 +1,8 @@
 import { USAGE, parseArgs } from "./args";
 import { UsageError, DEFAULT_CAPS, scanRoot, type Caps } from "./collect";
-import { TOOL_NAME, TOOL_VERSION, formatJson, toSarif } from "./output";
+import { TOOL_NAME, TOOL_VERSION, formatJson, toSarif, type ScanReport } from "./output";
 import { computeExitCode, countAtOrAbove } from "./exit";
-import { stripControl } from "./escape";
+import { sanitizeText } from "./escape";
 
 export interface Io {
   stdout: (chunk: string) => void;
@@ -16,7 +16,11 @@ const DEFAULT_IO: Io = {
 
 // Drive one CLI invocation and return the process exit code. All filesystem and
 // process interaction is isolated here; output building and exit logic are pure.
-export async function run(argv: readonly string[], io: Io = DEFAULT_IO, caps: Caps = DEFAULT_CAPS): Promise<0 | 1 | 2> {
+export async function run(
+  argv: readonly string[],
+  io: Io = DEFAULT_IO,
+  caps: Caps = DEFAULT_CAPS,
+): Promise<0 | 1 | 2> {
   const parsed = parseArgs(argv);
 
   if (parsed.kind === "help") {
@@ -36,35 +40,39 @@ export async function run(argv: readonly string[], io: Io = DEFAULT_IO, caps: Ca
 
   try {
     const outcome = await scanRoot(root, caps);
+    const collection = outcome.collection;
+    const report: ScanReport = {
+      complete: outcome.complete,
+      result: outcome.result,
+      skipped: collection.skipped,
+      skippedTotal: collection.skippedTotal,
+      skipCounts: collection.skipCounts,
+    };
     const gateHits = countAtOrAbove(outcome.result.findings, failOn);
     const exit = computeExitCode(outcome.complete, gateHits);
 
-    const body = format === "sarif" ? toSarif(outcome.result) : formatJson(outcome.result);
-    io.stdout(body);
+    io.stdout(format === "sarif" ? toSarif(report) : formatJson(report));
 
     if (!outcome.complete) {
       const notes: string[] = [];
       if (outcome.result.parseFailures.length > 0) {
-        notes.push(
-          `${outcome.result.parseFailures.length} file(s) could not be parsed`,
-        );
+        notes.push(`${outcome.result.parseFailures.length} file(s) could not be parsed`);
       }
-      if (outcome.collection.schemaIncomplete) {
-        notes.push("a SQL file was skipped (size, count, symlink, or unreadable)");
+      if (collection.inputIncomplete) {
+        notes.push("a scannable file was skipped (size, count, symlink, or unreadable)");
       }
       io.stderr(`supa-scan: scan is incomplete — ${notes.join("; ")} (exit 2)\n`);
     }
     return exit;
   } catch (error) {
     if (error instanceof UsageError) {
-      io.stderr(`${stripControl(error.message)}\n`);
+      io.stderr(`${sanitizeText(error.message)}\n`);
       return 2;
     }
-    io.stderr(`supa-scan: ${stripControl(String(error))}\n`);
+    io.stderr(`supa-scan: ${sanitizeText(String(error))}\n`);
     return 2;
   }
 }
 
-// Referenced to keep the collector's default caps exported through this module's
-// surface without callers importing collect directly.
+// Re-exported so callers can reuse the default caps without importing collect.
 export { DEFAULT_CAPS };
