@@ -43,6 +43,12 @@ jobs:
       - name: Lint
         run: pnpm run lint
 
+      # Next generates route/layout types (e.g. LayoutProps) into .next/types on
+      # build. A clean CI checkout has no .next/, so tsc --noEmit would fail on
+      # those references. `next typegen` produces them without a full build.
+      - name: Generate Next.js route types
+        run: pnpm exec next typegen
+
       - name: Typecheck
         run: pnpm run typecheck
 
