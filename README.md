@@ -14,10 +14,17 @@ into a client bundle or a Supabase secret committed to the repo.
 
 ## Status
 
-The scanner **engine** and **CLI** are implemented and tested: an ordered
-schema-state builder from a real AST, seven rules (five SQL, two source/env),
-JSON and SARIF output, deterministic and hostile-input-safe file collection, and
-CI exit codes. A client-side demo UI is the next milestone.
+Shipped and verified end to end: the scanner **engine** and **CLI** (an ordered
+schema-state builder from a real AST, seven rules — five SQL, two source/env),
+JSON and SARIF output, deterministic and hostile-input-safe file collection, CI
+exit codes, a **reusable composite GitHub Action** (`action.yml`), and the repo's
+own CI (lint · typecheck · test · a scan gate on the clean `fixtures/secure`).
+
+It is demonstrated against a real project too: the intentionally-insecure
+[`Vlex127/supa-scan-demo`](https://github.com/Vlex127/supa-scan-demo) is scanned
+by this Action on every push, and its **Security → Code scanning** tab shows the
+alerts (a `critical` service-role key in a client bundle, through to the
+SQL-policy findings). A client-side web UI remains a later milestone.
 
 ## What it checks (v1)
 
@@ -67,6 +74,45 @@ over count, a symlink we don't follow, or unreadable) or a file failed to parse,
 the scan is `complete: false`, surfaces in SARIF via
 `invocations[].toolExecutionNotifications` with `executionSuccessful: false`, and
 exits 2 rather than reporting a false-clean pass.
+
+## GitHub Action
+
+A reusable **composite Action** ships at the repo root (`action.yml`) so supa-scan
+runs in CI without you wiring the build yourself. It installs from the committed
+lockfile with `--frozen-lockfile --ignore-scripts`, builds the CLI, scans your
+project, uploads a **SARIF** report to GitHub **code scanning**, and fails the run
+on findings at or above your threshold.
+
+```yaml
+jobs:
+  supa-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # required to upload SARIF to code scanning
+      actions: read # required by the codeql-action SARIF uploader
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Vlex127/supa-scan@49cf6e98ed33b87c15bb6ef85942b099caef6e85
+        with:
+          path: . # project root to scan, relative to the workspace (default: repo root)
+          fail-on: high # critical | high | medium | low | info (default: high)
+          sarif: supa-scan-results.sarif # SARIF filename written to the workspace
+```
+
+The Action is **self-contained**: it builds the scanner from its own checkout
+(`github.action_path`), so it reads no secrets and reaches no network at scan
+time beyond installing its pinned dependencies. SARIF is uploaded with
+`if: always()`, so results are recorded even when the scan exits non-zero, and the
+run fails *after* the upload — a clean gate never hides the report.
+
+Pin the Action by **full commit SHA**, not a mutable tag, and confirm it resolves
+to the commit you expect (`gh api repos/Vlex127/supa-scan/git/refs/<ref>`). The
+SHA above is the current `action.yml`; Dependabot opens bump PRs for it.
+
+See it working end to end on the intentionally-insecure
+[`Vlex127/supa-scan-demo`](https://github.com/Vlex127/supa-scan-demo): that repo's
+Security → Code scanning tab is populated by this exact Action.
 
 ## Scope, secrets, and what "committed" means
 
